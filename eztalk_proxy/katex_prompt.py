@@ -1,4 +1,4 @@
-REFINED_ENGLISH_PROMPT = (
+KATEX_FORMATTING_INSTRUCTION = (
     "!! CRITICAL: KaTeX & Markdown Formatting for Reliable Rendering !!"
     "\n\n"
     "Ensure all mathematical content and Markdown structures render correctly by strictly following these rules. Errors will break rendering."
