@@ -118,14 +118,20 @@ async def chat_proxy(
             yield orjson_dumps_bytes_wrapper({"type": "finish", "reason": "internal_error", "timestamp": get_current_time_iso()})
             return
         
-        # VVVVVV 初始化在 try 块外部或其最开始处 VVVVVV
+        # VVVVVV 初始化在 try 块之前，确保它们总是有定义的 VVVVVV
         upstream_ok = False
         first_chunk_llm = False
-        # state 字典在 try 块内部定义，因为它依赖于 try 块内部的逻辑，
-        # 并且通常不会在 state 未初始化时进入 finally 块的相关部分（或 handle_stream_cleanup 会处理）。
-        # 如果 handle_stream_error 也需要 state，并且可能在 state 初始化前被调用，则 state 也需要提前初始化。
-        # 但目前错误是 upstream_ok，我们先解决它。
-        # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        state: Dict[str, Any] = { # 使用其完整的默认结构进行初始化
+            "accumulated_openai_content": "", "accumulated_openai_reasoning": "",
+            "openai_had_any_reasoning": False, "openai_had_any_content_or_tool_call": False,
+            "openai_reasoning_finish_event_sent": False,
+            "accumulated_google_thought": "", "accumulated_google_text": "",
+            "google_native_had_thoughts": False, "google_native_had_answer": False,
+            "accumulated_text_custom": "", "full_yielded_reasoning_custom": "",
+            "full_yield_content_custom": "", # 注意：这里之前可能是 full_yielded_content_custom
+            "found_separator_custom": False,
+        }
+        # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
         try:
             if request_data.use_web_search and user_query_for_search:
@@ -188,16 +194,8 @@ async def chat_proxy(
             logger.debug(f"RID-{request_id}: Sending to URL: {current_api_url}. Headers: {current_api_headers}. Payload preview (messages/contents): {' | '.join(payload_messages_preview)}")
 
             buffer = bytearray()
-            # upstream_ok 和 first_chunk_llm 已在 try 块之前初始化
-            state: Dict[str, Any] = {
-                "accumulated_openai_content": "", "accumulated_openai_reasoning": "",
-                "openai_had_any_reasoning": False, "openai_had_any_content_or_tool_call": False,
-                "openai_reasoning_finish_event_sent": False,
-                "accumulated_google_thought": "", "accumulated_google_text": "",
-                "google_native_had_thoughts": False, "google_native_had_answer": False,
-                "accumulated_text_custom": "", "full_yielded_reasoning_custom": "",
-                "full_yielded_content_custom": "", "found_separator_custom": False,
-            }
+            # `state` 字典现在已在 try 块之前初始化。
+            # `upstream_ok` 和 `first_chunk_llm` 也已在 try 块之前初始化。
 
             async with client.stream("POST", current_api_url, headers=current_api_headers, json=current_api_payload, params=current_api_params) as resp:
                 logger.info(f"RID-{request_id}: Upstream LLM response status: {resp.status_code}")
@@ -212,9 +210,9 @@ async def chat_proxy(
                         msg_detail = err_text[:200]
                     yield orjson_dumps_bytes_wrapper({"type": "error", "message": f"LLM API Error: {msg_detail}", "upstream_status": resp.status_code, "timestamp": get_current_time_iso()})
                     yield orjson_dumps_bytes_wrapper({"type": "finish", "reason": "upstream_error", "timestamp": get_current_time_iso()})
-                    return # upstream_ok 保持 False
+                    return 
 
-                upstream_ok = True # 连接成功且状态码正确
+                upstream_ok = True 
                 async for raw_chunk_bytes in resp.aiter_raw():
                     if not raw_chunk_bytes: continue
                     if not first_chunk_llm:
@@ -225,7 +223,6 @@ async def chat_proxy(
                     sse_lines, buffer = extract_sse_lines(buffer)
 
                     for sse_line_bytes in sse_lines:
-                        # ... (SSE line processing logic, unchanged from your provided code) ...
                         if not sse_line_bytes.strip(): continue
                         sse_data_bytes = b""
                         if sse_line_bytes.startswith(b"data: "):
@@ -234,9 +231,9 @@ async def chat_proxy(
                         logger.debug(f"RID-{request_id}, Raw SSE Data Line: {sse_data_bytes!r}")
 
                         if sse_data_bytes == b"[DONE]":
-                            if not use_google_sse_parser_flag: # OpenAI or compatible
+                            # ... ([DONE] processing logic, unchanged) ...
+                            if not use_google_sse_parser_flag: 
                                 logger.info(f"RID-{request_id}: Received [DONE] from OpenAI-like endpoint.")
-                                # Flush any remaining OpenAI accumulated data
                                 if state.get("accumulated_openai_reasoning"):
                                     processed_reasoning = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_openai_reasoning"])
                                     if processed_reasoning: yield orjson_dumps_bytes_wrapper({"type": "reasoning", "text": processed_reasoning, "timestamp": get_current_time_iso()})
@@ -249,9 +246,8 @@ async def chat_proxy(
                                     if processed_content: yield orjson_dumps_bytes_wrapper({"type": "content", "text": processed_content, "timestamp": get_current_time_iso()})
                                     state["accumulated_openai_content"] = ""
                                 yield orjson_dumps_bytes_wrapper({"type": "finish", "reason": "stop_openai_done", "timestamp": get_current_time_iso()})
-                            else: # Google path, but received [DONE] - unexpected
+                            else: 
                                 logger.warning(f"RID-{request_id}: Received [DONE] but was expecting Google format SSE. Treating as end.")
-                                # Flush any remaining Google accumulated data
                                 if state.get("accumulated_google_thought"):
                                     processed_thought = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_google_thought"])
                                     if processed_thought: yield orjson_dumps_bytes_wrapper({"type": "reasoning", "text": processed_thought, "timestamp": get_current_time_iso()})
@@ -284,11 +280,9 @@ async def chat_proxy(
                             async for event in process_openai_response(parsed_sse_data, state, request_id):
                                 yield event
         except Exception as e:
-            # upstream_ok 和 first_chunk_llm 在这里肯定是已定义的
             async for event in handle_stream_error(e, request_id, upstream_ok, first_chunk_llm):
                 yield event
         finally:
-            # upstream_ok 在这里肯定是已定义的
             if upstream_ok : 
                 if not use_google_sse_parser_flag : 
                     if state.get("accumulated_openai_reasoning"):
@@ -319,7 +313,7 @@ async def chat_proxy(
 
             state["_is_native_thinking_final_log"] = is_native_thinking_mode_active if is_google_like_path_active else False 
             async for event in handle_stream_cleanup(
-                state, request_id, upstream_ok, # upstream_ok 也是已定义的
+                state, request_id, upstream_ok, 
                 use_old_custom_separator_branch_flag,
                 request_data.provider 
             ):
