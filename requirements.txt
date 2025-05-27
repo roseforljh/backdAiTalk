@@ -1,7 +1,32 @@
+# FastAPI & Uvicorn
 fastapi>=0.100.0
-uvicorn[standard]>=0.20.0
-httpx[http2]>=0.24.0
-orjson>=3.8.0
+uvicorn[standard]>=0.23.0 # standard extras include watchfiles, python-dotenv, etc.
 
+# HTTP Client
+httpx[http2]>=0.25.0 # for making async HTTP requests, with HTTP/2 support
+
+# JSON processing
+orjson>=3.8.0 # Faster JSON library
+
+# Google Cloud / Vertex AI / Gemini
+google-cloud-aiplatform>=1.45.0 # <-- 这个库提供了 vertexai 模块，是与Vertex AI Gemini交互的核心
+# google-auth 会作为 google-cloud-aiplatform 的依赖自动安装，但明确指出也无妨
+google-auth>=2.20.0 # 用于Google Cloud认证
+
+# (可选，但您列出了) Google API Client Library for Python
+# 这个是较老的客户端库，用于多种Google API。
+# 如果您项目中其他地方没有明确用到它，并且所有Gemini/Vertex AI交互都通过 google-cloud-aiplatform，
+# 那么这个可能不是严格必需的。但如果已在用，保留即可。
 google-api-python-client
+
+# Pydantic (FastAPI的依赖，但明确指定版本有助于确保兼容性，特别是V2特性)
+pydantic>=2.0.0
+
+google-generativeai>=0.5.0 # 或者您安装的具体版本
+
+# (可选，但推荐) 用于从 .env 文件加载环境变量
+python-dotenv>=1.0.0
+
+# (可选) 如果您的FastAPI应用需要处理文件上传(multipart/form-data)
+# python-multipart
 

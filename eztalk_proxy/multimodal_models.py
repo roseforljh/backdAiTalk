@@ -1,21 +1,51 @@
-# multimodal_models.py
-# (可以放在 config 目录或与 api_helpers 同级)
+# eztalk_proxy/multimodal_models.py
+from pydantic import BaseModel, Field
+from typing import List, Union, Literal, Annotated, Optional, Dict, Any # 新增 Dict, Any, Optional
 
-KNOWN_OPENAI_MULTIMODAL_MODELS = {
-    "gpt-4-vision-preview", "gpt-4o", "gpt-4-turbo",
-}
-KNOWN_GOOGLE_MULTIMODAL_MODELS = {
-    "gemini-1.0-pro-vision-latest", "gemini-pro-vision",
-    "gemini-1.5-pro-latest", "gemini-1.5-flash-latest",
-}
+# --- API Content Part 模型 ---
+class BasePyApiContentPart(BaseModel):
+    type: str
 
-def is_model_multimodal(provider: str, model_name: str) -> bool:
-    model_lower = model_name.lower()
-    if provider == "openai":
-        return model_lower in KNOWN_OPENAI_MULTIMODAL_MODELS
-    elif provider == "google":
-        # 你的 is_gemini_2_5_model 也可以在这里被调用或集成
-        # from ..utils import is_gemini_2_5_model # 假设可以导入
-        # if is_gemini_2_5_model(model_name): return True
-        return model_lower in KNOWN_GOOGLE_MULTIMODAL_MODELS
-    return False
+class PyTextContentPart(BasePyApiContentPart):
+    type: Literal["text_content"]
+    text: str
+
+class PyFileUriContentPart(BasePyApiContentPart):
+    type: Literal["file_uri_content"]
+    uri: str
+    mime_type: str = Field(alias="mimeType")
+
+class PyInlineDataContentPart(BasePyApiContentPart):
+    type: Literal["inline_data_content"]
+    base64_data: str = Field(alias="base64Data")
+    mime_type: str = Field(alias="mimeType")
+
+IncomingApiContentPart = Annotated[
+    Union[
+        PyTextContentPart,
+        PyFileUriContentPart,
+        PyInlineDataContentPart
+    ],
+    Field(discriminator="type")
+]
+
+# --- 新增：ThinkingConfig 和 GenerationConfig Pydantic 模型 ---
+# 这些配置主要针对 Gemini 等支持高级生成的模型
+class ThinkingConfigPy(BaseModel):
+    include_thoughts: Optional[bool] = Field(None, alias="includeThoughts")
+    thinking_budget: Optional[int] = Field(None, alias="thinkingBudget", ge=0, le=24576)
+
+    class Config:
+        populate_by_name = True
+
+class GenerationConfigPy(BaseModel):
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+    top_p: Optional[float] = Field(None, alias="topP", ge=0.0, le=1.0) # 保持与前端一致的别名
+    max_output_tokens: Optional[int] = Field(None, alias="maxOutputTokens", gt=0) # 保持与前端一致的别名
+    # candidate_count: Optional[int] = None # 按需添加
+    # stop_sequences: Optional[List[str]] = None # 按需添加
+    
+    thinking_config: Optional[ThinkingConfigPy] = Field(None, alias="thinkingConfig")
+
+    class Config:
+        populate_by_name = True
