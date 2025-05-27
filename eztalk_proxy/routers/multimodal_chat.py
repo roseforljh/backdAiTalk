@@ -1,276 +1,279 @@
-# routers/multimodal_chat.py
+# eztalk_proxy/routers/multimodal_chat.py
 import os
 import logging
-import httpx
+import httpx # httpx 客户端实例会从 main.py 传递过来
 import orjson
+import base64 # 用于解码前端传来的 base64 图片数据
 from typing import Optional, Dict, Any, AsyncGenerator, List
+import asyncio # 用于 asyncio.to_thread
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException # Request 用于检查客户端断开
 from fastapi.responses import StreamingResponse
 
-# 导入后端 Pydantic 模型 (确保它们支持多模态 content)
-from ..models import ChatRequest, ApiMessage, ApiContentPart, ApiImageUrlPart 
-from ..config import GOOGLE_API_BASE_URL, COMMON_HEADERS
+# 导入 Pydantic 模型
+from ..models import (
+    ChatRequestModel, PartsApiMessagePy, AppStreamEventPy,
+    IncomingApiContentPart, TextPartWrapper, FileUriPartWrapper, InlineDataPartWrapper
+)
+from ..config import COMMON_HEADERS, GOOGLE_APPLICATION_CREDENTIALS_STRING # 假设凭证在config中管理
 from ..utils import (
     extract_sse_lines, get_current_time_iso,
-    orjson_dumps_bytes_wrapper, strip_potentially_harmful_html_and_normalize_newlines
+    orjson_dumps_bytes_wrapper,
+    strip_potentially_harmful_html_and_normalize_newlines
 )
-# 导入多模态相关的辅助函数
-from ..multimodal_models import is_model_multimodal 
-from ..multimodal_api_helpers import prepare_openai_multimodal_request, prepare_google_multimodal_request
-# Web搜索和流处理器可能也需要，或者为多模态做特定调整
+# 导入可能的 Web 搜索辅助函数 (如果Gemini也需要Web搜索)
 from ..web_search import perform_web_search, generate_search_context_message_content
-from ..stream_processors import ( # 这些处理器可能需要知道如何处理从多模态模型返回的响应
-    process_openai_response, process_google_response, # 可能需要多模态版本
-    handle_stream_error, handle_stream_cleanup,
-    should_apply_custom_separator_logic # 这个可能也需要考虑多模态
+
+# 导入 Vertex AI SDK
+import vertexai
+from vertexai.generative_models import (
+    GenerativeModel, Part, Content, FinishReason, Tool
 )
+# from vertexai.generative_models import HarmCategory, HarmBlockThreshold # 按需导入安全设置
+from vertexai.preview.generative_models import GenerationConfig as VertexGenerationConfig # 使用 preview 下的，如果需要 thoughts 等功能
+from google.auth import credentials as auth_credentials # 用于从字符串创建凭证
+from google.oauth2 import service_account
 
-logger = logging.getLogger("EzTalkProxy.Routers.MultimodalChat") # 新的 logger 名称
-router = APIRouter() # 新的 router 实例
+logger = logging.getLogger("EzTalkProxy.Routers.MultimodalChat")
+# router = APIRouter() # 这个模块不直接定义路由，而是被 chat.py 调用
 
-async def get_http_client(request: Request) -> Optional[httpx.AsyncClient]:
-    return getattr(request.app.state, "http_client", None)
+# --- Vertex AI 初始化相关的辅助函数 ---
+_vertex_ai_initialized = False
+_google_credentials_object = None
 
-@router.post("/chat_multimodal", response_class=StreamingResponse, summary="AI多模态聊天代理", tags=["AI Proxy Multimodal"])
-async def multimodal_chat_proxy(
-    request_data: ChatRequest, # ChatRequest Pydantic 模型应该能处理多模态 content
-    client: Optional[httpx.AsyncClient] = Depends(get_http_client)
-):
-    request_id = os.urandom(8).hex()
-    logger.info(
-        f"RID-{request_id}: Received /chat_multimodal request: Provider='{request_data.provider}', Model='{request_data.model}'"
-    )
+def initialize_vertex_ai_and_credentials():
+    global _vertex_ai_initialized, _google_credentials_object
+    if _vertex_ai_initialized:
+        return _google_credentials_object
 
-    if not client:
-        # ... (client 错误处理) ...
-        pass
+    try:
+        if GOOGLE_APPLICATION_CREDENTIALS_STRING:
+            logger.info("使用 config.py 中的 GOOGLE_APPLICATION_CREDENTIALS_STRING 初始化 Vertex AI 凭证...")
+            creds_json = orjson.loads(GOOGLE_APPLICATION_CREDENTIALS_STRING)
+            _google_credentials_object = service_account.Credentials.from_service_account_info(creds_json)
+            vertexai.init(credentials=_google_credentials_object) # 可以不指定 project 和 location，让 SDK 自动从凭证获取
+            logger.info("Vertex AI SDK (带字符串凭证) 初始化成功。")
+        else:
+            # 尝试使用应用默认凭证 (ADC)
+            logger.info("尝试使用应用默认凭证 (ADC) 初始化 Vertex AI...")
+            vertexai.init() # project 和 location 可以让SDK从环境中自动获取，或者在此处指定
+            _google_credentials_object = None # 表示使用的是ADC
+            logger.info("Vertex AI SDK (ADC) 初始化成功。")
+        _vertex_ai_initialized = True
+        return _google_credentials_object
+    except Exception as e:
+        logger.error(f"Vertex AI 初始化失败: {e}", exc_info=True)
+        _vertex_ai_initialized = False # 标记为未成功初始化
+        _google_credentials_object = None
+        raise RuntimeError(f"Vertex AI SDK 初始化失败: {e}") from e
 
-    # 1. 检查模型是否确实支持多模态 (可选，但推荐)
-    if not is_model_multimodal(request_data.provider, request_data.model):
-        logger.warning(f"RID-{request_id}: Model '{request_data.model}' called on multimodal endpoint but not listed as multimodal.")
-        # 可以选择报错，或者尝试按多模态处理（如果 prepare 函数能优雅降级）
-        # For now, we proceed, assuming prepare_..._multimodal_request handles it or the list is comprehensive.
 
-    # 2. 将前端 ApiMessage 转换为通用的 List[Dict[str, Any]] 结构
-    #    这个结构将包含原始的 content (List[ApiContentPart Pydantic模型] 或 str)
-    messages_for_llm_preparation: List[Dict[str, Any]] = []
-    user_query_for_search_parts: List[str] = []
+# --- SSE 事件序列化 ---
+async def sse_event_serializer_multimodal(event_data: AppStreamEventPy) -> bytes:
+    # 注意：orjson_dumps_bytes_wrapper 应该能处理 Pydantic 模型
+    return orjson_dumps_bytes_wrapper(event_data.model_dump(exclude_none=True, by_alias=True))
 
-    for msg_model in request_data.messages:
-        if msg_model.content is None and msg_model.tool_calls is None and msg_model.role != "system":
-            continue
+
+# --- 主要的事件生成器 ---
+async def generate_gemini_events_internal(
+    gemini_chat_input: ChatRequestModel,
+    raw_request: Request, # FastAPI Request object
+    http_client: httpx.AsyncClient, # 保持签名一致性，但Vertex SDK不直接使用它
+    request_id: str # 用于日志
+) -> AsyncGenerator[bytes, None]:
+    log_prefix = f"RID-{request_id}"
+
+    try:
+        initialize_vertex_ai_and_credentials() # 确保Vertex AI已初始化
+
+        # 1. 模型名称映射 (如果需要)
+        #    (与您在 chat.py 中为 Gemini 模型准备的逻辑类似)
+        model_name_map = {
+            # "gemini-2.5-pro-preview-05-06": "gemini-1.5-pro-preview-0409", # 旧示例，根据实际可用调整
+            "gemini-1.5-pro-latest": "gemini-1.5-pro-latest",
+            "gemini-1.5-flash-latest": "gemini-1.5-flash-latest",
+            # 添加其他您前端可能发送的 Gemini 模型名称到 Vertex AI SDK 可识别名称的映射
+        }
+        sdk_model_name = model_name_map.get(gemini_chat_input.model.lower(), gemini_chat_input.model)
+        logger.info(f"{log_prefix}: Using Vertex AI model '{sdk_model_name}' (original: '{gemini_chat_input.model}')")
         
-        msg_dict_generic = {"role": msg_model.role}
-        current_content_for_generic = []
+        gemini_model_vertex = GenerativeModel(sdk_model_name)
+
+        # 2. 构建 Vertex AI SDK 的 contents 列表
+        contents_for_vertex: List[Content] = []
+        user_query_for_search_parts: List[str] = [] # 收集用户文本用于Web搜索
+
+        for i, msg_abstract in enumerate(gemini_chat_input.messages):
+            if not isinstance(msg_abstract, PartsApiMessagePy):
+                logger.warning(f"{log_prefix}: Gemini handler expected PartsApiMessagePy but got {type(msg_abstract)} at index {i}. Skipping.")
+                continue
+
+            vertex_parts: List[Part] = []
+            for part_wrapper in msg_abstract.parts: # part_wrapper 是 IncomingApiContentPart
+                actual_part_data = None
+                try:
+                    if isinstance(part_wrapper, TextPartWrapper):
+                        actual_part_data = part_wrapper.text_content
+                        vertex_parts.append(Part.from_text(actual_part_data.text))
+                        if msg_abstract.role == "user": # 仅收集用户文本用于搜索
+                            user_query_for_search_parts.append(actual_part_data.text)
+                    elif isinstance(part_wrapper, FileUriPartWrapper):
+                        actual_part_data = part_wrapper.file_uri_content
+                        if not (actual_part_data.uri.startswith("gs://") or actual_part_data.uri.startswith("https://")):
+                            logger.warning(f"{log_prefix}: Invalid URI scheme for FileUriPart: {actual_part_data.uri}. Skipping.")
+                            # 可以选择yield一个错误事件给前端
+                            # yield await sse_event_serializer_multimodal(AppStreamEventPy(type="error", message=f"图片URI格式无效: {actual_part_data.uri}", timestamp=get_current_time_iso()))
+                            continue
+                        vertex_parts.append(Part.from_uri(uri=actual_part_data.uri, mime_type=actual_part_data.mime_type))
+                    elif isinstance(part_wrapper, InlineDataPartWrapper):
+                        actual_part_data = part_wrapper.inline_data_content
+                        decoded_data = base64.b64decode(actual_part_data.base64_data)
+                        vertex_parts.append(Part.from_data(data=decoded_data, mime_type=actual_part_data.mime_type))
+                except Exception as e_part:
+                    logger.error(f"{log_prefix}: Error processing message part for Gemini: {part_wrapper}, Error: {e_part}", exc_info=True)
+                    # yield await sse_event_serializer_multimodal(AppStreamEventPy(type="error", message=f"处理消息部分失败: {e_part}", timestamp=get_current_time_iso()))
+                    continue # 跳过这个损坏的part
+
+            if vertex_parts:
+                vertex_role = "model" if msg_abstract.role == "assistant" else msg_abstract.role
+                if vertex_role not in ["user", "model"]:
+                    logger.warning(f"{log_prefix}: Invalid role '{msg_abstract.role}' for Gemini, mapping to 'user'.")
+                    vertex_role = "user"
+                contents_for_vertex.append(Content(role=vertex_role, parts=vertex_parts))
         
-        if isinstance(msg_model.content, list): # Pydantic 解析为 List[ApiContentPart]
-            for part_model in msg_model.content:
-                part_dict = {"type": part_model.type}
-                if part_model.type == "text" and part_model.text:
-                    part_dict["text"] = part_model.text
-                    if msg_model.role == "user": user_query_for_search_parts.append(part_model.text)
-                elif part_model.type == "image_url" and part_model.image_url and part_model.image_url.url:
-                    part_dict["image_url"] = {"url": part_model.image_url.url, "detail": part_model.image_url.detail or "auto"}
-                current_content_for_generic.append(part_dict)
-        elif isinstance(msg_model.content, str) and msg_model.content.strip(): # 兼容纯文本部分
-            current_content_for_generic.append({"type": "text", "text": msg_model.content.strip()})
-            if msg_model.role == "user": user_query_for_search_parts.append(msg_model.content.strip())
-        
-        if current_content_for_generic:
-            msg_dict_generic["content"] = current_content_for_generic
-        elif msg_model.role == "system" and not current_content_for_generic :
-             msg_dict_generic["content"] = []
-
-
-        if msg_model.tool_calls:
-            msg_dict_generic["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in msg_model.tool_calls]
-        if msg_model.role == "tool":
-            if msg_model.tool_call_id: msg_dict_generic["tool_call_id"] = msg_model.tool_call_id
-            if msg_model.name: msg_dict_generic["name"] = msg_model.name
-            if isinstance(msg_model.content, str) and "content" not in msg_dict_generic : # tool content is string
-                msg_dict_generic["content"] = msg_model.content
-
-
-        if "content" in msg_dict_generic or "tool_calls" in msg_dict_generic or \
-           (msg_model.role == "system" and "content" in msg_dict_generic) or \
-           (msg_model.role == "tool" and "tool_call_id" in msg_dict_generic) :
-            messages_for_llm_preparation.append(msg_dict_generic)
-
-    user_query_for_search = " ".join(user_query_for_search_parts).strip()
-
-    if not any(m.get("role") != "system" for m in messages_for_llm_preparation):
-        if not any(m.get("role") == "system" and m.get("content") for m in messages_for_llm_preparation):
-            # ... (no_message_error_gen)
-            pass
-    
-    # --- Provider 和路径选择逻辑 (与原 chat.py 类似，但调用多模态的 prepare 函数) ---
-    is_native_thinking_mode_active = False # 这些 flag 可能在多模态 prepare 函数中设置
-    use_google_sse_parser_flag = False
-    # is_google_payload_format_used_flag = False # 这个 flag 可能更多地与 prepare 函数的内部实现有关
-    # is_google_like_path_active = False
-
-
-    if request_data.provider == "google":
-        use_google_sse_parser_flag = True # Google 通常使用其特定的 SSE 格式
-        # is_google_like_path_active = True # 这个flag的原始用途需要审视
-    
-    # stream_generator 内部逻辑与原 chat.py 非常相似，但 prepare_... 函数调用不同
-    async def stream_generator() -> AsyncGenerator[bytes, None]:
-        nonlocal messages_for_llm_preparation, user_query_for_search # 使用新处理的消息列表
-        # ... (声明其他需要 nonlocal 的 flags)
-        nonlocal is_native_thinking_mode_active, use_google_sse_parser_flag
-
-        if not client:
-            # ... (client error)
-            pass
-        
-        current_api_payload: Dict[str, Any]
-        current_api_url: str
-        current_api_headers: Dict[str, str]
-        current_api_params: Optional[Dict[str, str]] = None
-
-        effective_messages_for_api = messages_for_llm_preparation # 初始值
-
-        # Web 搜索逻辑 (如果多模态请求也支持 Web 搜索)
-        if request_data.use_web_search and user_query_for_search:
-            yield orjson_dumps_bytes_wrapper({"type": "status_update", "stage": "web_search_started", "timestamp": get_current_time_iso()})
-            search_results_list = await perform_web_search(user_query_for_search, request_id)
-            if search_results_list:
-                search_context_content = generate_search_context_message_content(user_query_for_search, search_results_list)
-                new_system_message_dict = {"role": "system", "content": [{"type": "text", "text": search_context_content}]}
-                
-                temp_messages_with_search = effective_messages_for_api.copy() # 操作副本
-                last_user_message_idx_for_injection = -1
-                for i, msg_dict_item in reversed(list(enumerate(temp_messages_with_search))):
-                    if msg_dict_item.get("role") == "user":
-                        last_user_message_idx_for_injection = i
-                        break
-                if last_user_message_idx_for_injection != -1:
-                    temp_messages_with_search.insert(last_user_message_idx_for_injection, new_system_message_dict)
-                else:
-                    temp_messages_with_search.insert(0, new_system_message_dict)
-                effective_messages_for_api = temp_messages_with_search # 更新
-
-                logger.info(f"RID-{request_id}: (Multimodal) Web search context injected.")
-                yield orjson_dumps_bytes_wrapper({"type": "status_update", "stage": "web_search_complete_with_results", "query": user_query_for_search, "timestamp": get_current_time_iso()})
-                yield orjson_dumps_bytes_wrapper({"type": "web_search_results", "results": [r.model_dump() for r in search_results_list], "timestamp": get_current_time_iso()})
-            else:
-                # ... (no results)
-                pass
-            yield orjson_dumps_bytes_wrapper({"type": "status_update", "stage": "web_analysis_started", "timestamp": get_current_time_iso()})
-
-
-        # 调用特定于多模态的 prepare 函数
-        if request_data.provider == "google":
-            current_api_payload, is_native_thinking_mode_active = prepare_google_multimodal_request(
-                request_data, effective_messages_for_api, request_id
-            )
-            current_api_url = f"{GOOGLE_API_BASE_URL}/v1beta/models/{request_data.model}:streamGenerateContent" # 或 vision 特定端点
-            current_api_params = {"key": request_data.api_key, "alt": "sse"}
-            current_api_headers = {"Content-Type": "application/json"}
-
-        elif request_data.provider == "openai":
-            current_api_url, current_api_headers, current_api_payload = prepare_openai_multimodal_request(
-                request_data, effective_messages_for_api, request_id
-            )
-        else: # 理论上不应到达这里，因为前面有 provider 检查
-            yield orjson_dumps_bytes_wrapper({"type": "error", "message": f"Multimodal handler: Unsupported provider '{request_data.provider}'", "timestamp": get_current_time_iso()})
-            yield orjson_dumps_bytes_wrapper({"type": "finish", "reason": "bad_request", "timestamp": get_current_time_iso()})
+        if not contents_for_vertex:
+            logger.warning(f"{log_prefix}: No valid contents to send to Gemini model '{sdk_model_name}'.")
+            yield await sse_event_serializer_multimodal(AppStreamEventPy(type="error", message="没有有效内容发送给模型。", timestamp=get_current_time_iso()))
+            yield await sse_event_serializer_multimodal(AppStreamEventPy(type="finish", reason="no_content", timestamp=get_current_time_iso()))
             return
 
-        # 你的 should_apply_custom_separator_logic 可能对多模态不适用或需要调整
-        # use_old_custom_separator_branch_flag = should_apply_custom_separator_logic(...)
+        user_query_for_search = " ".join(user_query_for_search_parts).strip()
 
-        # 日志、buffer、state 初始化
-        # ... (与原 chat.py 类似)
-        logger.debug(f"RID-{request_id}: (Multimodal) Sending to URL: {current_api_url}...")
+        # 3. Web搜索逻辑 (如果Gemini也需要)
+        #    与 chat.py 中的逻辑类似，但注入的 search_context_message 应该是 Content 对象或 Part 对象
+        if gemini_chat_input.use_web_search and user_query_for_search:
+            yield await sse_event_serializer_multimodal(AppStreamEventPy(type="status_update", stage="web_search_started", timestamp=get_current_time_iso()))
+            # search_results_list = await perform_web_search(user_query_for_search, request_id)
+            # ... (注入搜索结果为新的 Content(role="user", parts=[Part.from_text(...)]) 到 contents_for_vertex 合适的位置)
+            # yield orjson_dumps_bytes_wrapper(...) for web_search_results and web_analysis_started
+            logger.info(f"{log_prefix}: Web search for Gemini (query: {user_query_for_search[:100]}) - Placeholder, implement if needed.")
+            # 假设这里Web搜索完成
+            yield await sse_event_serializer_multimodal(AppStreamEventPy(type="status_update", stage="web_analysis_started", timestamp=get_current_time_iso()))
 
 
-        # VVVVVV 从这里开始的 async with client.stream(...) 到 finally 块 VVVVVV
-        # 这部分流式处理、SSE解析、调用 process_openai_response/process_google_response、
-        # 错误处理、清理逻辑，与你现有的 chat.py 中的 stream_generator 内部的这部分代码
-        # **几乎完全相同或非常相似**。
-        #
-        # 主要区别可能在于：
-        # 1. `use_google_sse_parser_flag` 的设置。
-        # 2. `process_openai_response` 和 `process_google_response` 是否需要为多模态模型的响应做特殊处理
-        #    (通常多模态模型的文本响应部分与纯文本模型相似，但可能包含对图片的引用或描述)。
-        # 3. `should_apply_custom_separator_logic` 的适用性。
-        #
-        # **为了不重复大量代码，你可以考虑将这个通用的流处理循环也提取到一个辅助函数中，**
-        # 或者确保这里的实现与 `chat.py` 中的保持一致（如果响应格式没有本质区别）。
-        #
-        # 我将复制粘贴你之前提供的 `chat.py` 中 `stream_generator` 的 `try/except/finally` 块，
-        # 你需要仔细检查并调整 `use_google_sse_parser_flag` 和 `state` 的初始化，
-        # 以及 `process_..._response` 是否能正确处理。
-        #
-        # [ 这里应该是你原有的 try/except/finally 流处理逻辑 ]
-        # 为了代码完整性，我将粘贴一个结构，你需要用你的详细逻辑填充
-        buffer = bytearray()
-        upstream_ok = False
-        first_chunk_llm = False
-        state: Dict[str, Any] = { # 根据你的 stream_processors 初始化 state
-            "accumulated_openai_content": "", "accumulated_openai_reasoning": "",
-            "openai_had_any_reasoning": False, "openai_had_any_content_or_tool_call": False,
-            "openai_reasoning_finish_event_sent": False,
-            "accumulated_google_thought": "", "accumulated_google_text": "",
-            "google_native_had_thoughts": False, "google_native_had_answer": False,
-            "accumulated_text_custom": "", "full_yielded_reasoning_custom": "",
-            "full_yielded_content_custom": "", "found_separator_custom": False,
-        }
-        _use_old_custom_separator_branch_flag = False # 假设多模态默认不用旧逻辑，或根据模型判断
+        # 4. 构建 GenerationConfig
+        gen_config_dict = {}
+        if gemini_chat_input.temperature is not None: gen_config_dict["temperature"] = gemini_chat_input.temperature
+        if gemini_chat_input.top_p is not None: gen_config_dict["top_p"] = gemini_chat_input.top_p
+        if gemini_chat_input.max_tokens is not None: gen_config_dict["max_output_tokens"] = gemini_chat_input.max_tokens
+        # if gemini_chat_input.candidate_count is not None: gen_config_dict["candidate_count"] = gemini_chat_input.candidate_count # 如果支持
+        # if gemini_chat_input.stop_sequences is not None: gen_config_dict["stop_sequences"] = gemini_chat_input.stop_sequences # 如果支持
+        
+        # 处理 thoughts (如果您的模型和SDK版本支持)
+        # Vertex AI SDK 的 `GenerationConfig` (preview 版) 支持 `include_internal_details` 来获取 `Segment` 等。
+        # 对于类似 "thoughts" 的输出，您可能需要检查 `gemini_chat_input.custom_model_parameters`
+        # 并相应设置 `tools` 或 `tool_config` (如果Gemini使用类似方式输出思考过程)
+        # 或者，Vertex AI 的某些Gemini版本直接在GenerationConfig中支持思考过程，例如：
+        # if gemini_chat_input.custom_model_parameters and gemini_chat_input.custom_model_parameters.get("google", {}).get("include_thoughts"):
+        #    gen_config_dict["include_thoughts"] = True # 示例，具体参数名需查阅SDK文档
 
-        try:
-            async with client.stream("POST", current_api_url, headers=current_api_headers, json=current_api_payload, params=current_api_params) as resp:
-                logger.info(f"RID-{request_id}: (Multimodal) Upstream LLM response status: {resp.status_code}")
-                if not (200 <= resp.status_code < 300):
-                    # ... (错误处理)
-                    return
+        vertex_gen_config = VertexGenerationConfig(**gen_config_dict) if gen_config_dict else None
+        
+        # TODO: 处理 tools 和 tool_choice (如果Gemini请求需要函数调用)
+        # gemini_tools: Optional[List[Tool]] = None
+        # if gemini_chat_input.tools:
+        #     try:
+        #         gemini_tools = [Tool.from_dict(t) for t in gemini_chat_input.tools] # 假设格式兼容
+        #     except Exception as e_tool:
+        #         logger.error(f"{log_prefix}: Error parsing tools for Gemini: {e_tool}")
+        #         # yield error event
+        
+        logger.debug(f"{log_prefix}: Sending to Vertex Gemini. Model: {sdk_model_name}, Contents Count: {len(contents_for_vertex)}, Config: {vertex_gen_config}")
 
-                upstream_ok = True
-                async for raw_chunk_bytes in resp.aiter_raw():
-                    if not raw_chunk_bytes: continue
-                    if not first_chunk_llm:
-                        if request_data.use_web_search and user_query_for_search and search_results_generated:
-                            yield orjson_dumps_bytes_wrapper({"type": "status_update", "stage": "web_analysis_complete", "timestamp": get_current_time_iso()})
-                        first_chunk_llm = True
-                    buffer.extend(raw_chunk_bytes)
-                    sse_lines, buffer = extract_sse_lines(buffer)
+        # 5. 调用 Gemini API 并流式处理响应
+        first_chunk_received = False
+        stream = await asyncio.to_thread(
+            gemini_model_vertex.generate_content,
+            contents_for_vertex,
+            generation_config=vertex_gen_config,
+            # tools=gemini_tools, # 如果支持并已准备好
+            stream=True
+        )
 
-                    for sse_line_bytes in sse_lines:
-                        # ... (SSE行处理，与原chat.py相同)
-                        if not sse_line_bytes.strip(): continue
-                        sse_data_bytes = b""
-                        if sse_line_bytes.startswith(b"data: "):
-                            sse_data_bytes = sse_line_bytes[len(b"data: "):].strip()
-                        if not sse_data_bytes: continue
+        for chunk in stream:
+            if await raw_request.is_disconnected():
+                logger.info(f"{log_prefix}: Client disconnected during Gemini stream.")
+                break
+            
+            if not first_chunk_received:
+                if gemini_chat_input.use_web_search and user_query_for_search: # 假设Web搜索已完成
+                     yield await sse_event_serializer_multimodal(AppStreamEventPy(type="status_update", stage="web_analysis_complete", timestamp=get_current_time_iso()))
+                first_chunk_received = True
 
-                        if sse_data_bytes == b"[DONE]":
-                            # ... (与原chat.py相同的[DONE]处理逻辑)
-                            return
+            # Vertex AI SDK chunk 结构:
+            # chunk.text (快捷方式，如果只有文本)
+            # chunk.candidates[0].content.parts (更通用)
+            # chunk.candidates[0].finish_reason
+            # chunk.candidates[0].safety_ratings
+            # chunk.candidates[0].function_calls (如果使用了函数调用)
+            # chunk.candidates[0].internal_details (如果 GenerationConfig 中开启了 include_internal_details)
 
-                        try: parsed_sse_data = orjson.loads(sse_data_bytes)
-                        except: # ...
-                            continue
-                        
-                        if use_google_sse_parser_flag: # Google
-                            async for event in process_google_response(parsed_sse_data, state, request_id, is_native_thinking_mode_active, _use_old_custom_separator_branch_flag): # 传递正确的flag
-                                yield event
-                                # ... (检查 type == "finish")
-                        else: # OpenAI
-                            async for event in process_openai_response(parsed_sse_data, state, request_id): # _use_old_custom_separator_branch_flag 对 OpenAI 可能不适用
-                                yield event
-                                # ... (检查 type == "finish")
+            # 示例：处理文本内容
+            if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                full_chunk_text = ""
+                for part in chunk.candidates[0].content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        full_chunk_text += part.text
+                
+                if full_chunk_text:
+                    # TODO: 区分 "reasoning" (thoughts) 和 "content"
+                    # 这取决于 Vertex AI SDK 如何返回 "thoughts"。
+                    # 如果 thoughts 通过特定的 part 类型或字段返回，在这里处理。
+                    # 假设现在所有文本都是 "content"。
+                    yield await sse_event_serializer_multimodal(AppStreamEventPy(type="content", text=full_chunk_text, timestamp=get_current_time_iso()))
 
-        except Exception as e:
-            async for event in handle_stream_error(e, request_id, upstream_ok, first_chunk_llm):
-                yield event
-        finally:
-            async for event in handle_stream_cleanup(
-                state, request_id, upstream_ok,
-                _use_old_custom_separator_branch_flag, # 传递正确的flag
-                request_data.provider
-            ):
-                yield event
-    return StreamingResponse(stream_generator(), media_type="text/event-stream", headers=COMMON_HEADERS)
+            # 示例：处理函数调用 (如果支持)
+            # if chunk.candidates and chunk.candidates[0].function_calls:
+            #     for fc in chunk.candidates[0].function_calls:
+            #         # 转换为前端期望的 AppStreamEventPy 格式 (type="tool_calls_chunk" 或 "google_function_call_request")
+            #         # yield await sse_event_serializer_multimodal(AppStreamEventPy(type="google_function_call_request", name=fc.name, arguments_obj=fc.args, ...))
+            #         pass
+
+
+            if chunk.candidates and chunk.candidates[0].finish_reason != FinishReason.UNSPECIFIED:
+                finish_reason_str = FinishReason(chunk.candidates[0].finish_reason).name.lower()
+                logger.info(f"{log_prefix}: Gemini stream finished with reason: {finish_reason_str}")
+                yield await sse_event_serializer_multimodal(AppStreamEventPy(type="finish", reason=finish_reason_str, timestamp=get_current_time_iso()))
+                break
+        
+        # 如果循环正常结束但没有收到明确的finish_reason (不太可能，但作为保险)
+        # yield await sse_event_serializer_multimodal(AppStreamEventPy(type="finish", reason="stream_end", timestamp=get_current_time_iso()))
+
+
+    except vertexai.generative_models.generation_utils.BlockedBySafetySettingError as e_safety:
+        logger.error(f"{log_prefix}: Vertex Gemini content blocked by safety: {e_safety}", exc_info=True)
+        yield await sse_event_serializer_multimodal(AppStreamEventPy(type="error", message="内容被安全策略阻止。", reason="SAFETY", timestamp=get_current_time_iso()))
+        yield await sse_event_serializer_multimodal(AppStreamEventPy(type="finish", reason="safety", timestamp=get_current_time_iso()))
+    except RuntimeError as e_runtime: # 例如 Vertex AI 初始化失败
+        logger.error(f"{log_prefix}: Runtime error during Gemini processing: {e_runtime}", exc_info=True)
+        yield await sse_event_serializer_multimodal(AppStreamEventPy(type="error", message=f"服务内部错误: {e_runtime}", timestamp=get_current_time_iso()))
+        yield await sse_event_serializer_multimodal(AppStreamEventPy(type="finish", reason="internal_error", timestamp=get_current_time_iso()))
+    except Exception as e:
+        logger.error(f"{log_prefix}: Generic error in Gemini chat events: {e}", exc_info=True)
+        yield await sse_event_serializer_multimodal(AppStreamEventPy(type="error", message=str(e), timestamp=get_current_time_iso()))
+        yield await sse_event_serializer_multimodal(AppStreamEventPy(type="finish", reason="unknown_error", timestamp=get_current_time_iso()))
+
+
+# 这个函数将被 routers/chat.py 调用
+async def handle_gemini_request_entry(
+    gemini_chat_input: ChatRequestModel,
+    raw_request: Request,
+    http_client: httpx.AsyncClient, # 传递以保持接口一致性，尽管Vertex SDK可能不直接用它
+    request_id: str
+):
+    logger.info(f"RID-{request_id}: Entering Gemini request handler for model {gemini_chat_input.model}")
+    return StreamingResponse(
+        generate_gemini_events_internal(gemini_chat_input, raw_request, http_client, request_id),
+        media_type="text/event-stream",
+        headers=COMMON_HEADERS # 使用通用头部
+    )
