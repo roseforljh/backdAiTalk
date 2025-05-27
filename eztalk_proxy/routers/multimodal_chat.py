@@ -91,7 +91,7 @@ async def generate_gemini_rest_api_events(
             search_results_generated_this_time = True
             logger.info(f"{log_prefix}: (Gemini REST) Web search context injected.")
             yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="web_search_complete_with_results", query=user_query_for_search_gemini, timestamp=get_current_time_iso()))
-            yield await sse_event_serializer_rest(AppStreamEventPy(type="web_search_results", results=[r.model_dump() for r in search_results_list], timestamp=get_current_time_iso()))
+            yield await sse_event_serializer_rest(AppStreamEventPy(type="web_search_results", results=search_results_list, timestamp=get_current_time_iso()))
         else:
             logger.info(f"{log_prefix}: (Gemini REST) Web search yielded no results for query '{user_query_for_search_gemini[:100]}'.")
             yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="web_search_complete_no_results", query=user_query_for_search_gemini, timestamp=get_current_time_iso()))
