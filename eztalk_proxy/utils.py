@@ -3,27 +3,45 @@
 import orjson
 import re
 import logging
-import datetime # 在 get_current_time_iso 中使用 datetime.datetime
+import datetime
 from typing import Any, Dict, List, Tuple, Optional
+import os # 新增导入
+import shutil # 新增导入
 
 from fastapi.responses import JSONResponse
 
-# 假设您的 config.py 文件与 utils.py 在同一目录下或可通过相对路径访问
-# 并定义了 COMMON_HEADERS 和 MAX_SSE_LINE_LENGTH
-from .config import COMMON_HEADERS, MAX_SSE_LINE_LENGTH
+from .config import ( # 确保从 config 导入新加的配置
+    COMMON_HEADERS,
+    MAX_SSE_LINE_LENGTH,
+    TEMP_UPLOAD_DIR, # 新增
+    SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION, # 新增
+    MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT # 新增
+)
+
+# 尝试导入文档处理库，如果失败则记录警告，相关功能将受限
+try:
+    import PyPDF2 # 用于 PDF
+except ImportError:
+    PyPDF2 = None
+    logging.warning("PyPDF2 library not found. PDF text extraction will not be available.")
+
+try:
+    import docx # python-docx, 用于 DOCX
+except ImportError:
+    docx = None
+    logging.warning("python-docx library not found. DOCX text extraction will not be available.")
+
+# try:
+#     import magic # python-magic, 用于更可靠的MIME类型检测 (可选)
+# except ImportError:
+#     magic = None
+#     logging.warning("python-magic library not found. Advanced MIME type detection will rely on browser-provided types.")
+
 
 logger = logging.getLogger("EzTalkProxy.Utils")
 
 
 def orjson_dumps_bytes_wrapper(data: Any) -> bytes:
-    """
-    使用 orjson 将数据序列化为字节串。
-    选项:
-    - OPT_NON_STR_KEYS: 允许非字符串键（如果您的数据结构需要）。
-    - OPT_PASSTHROUGH_DATETIME: datetime 对象将按原样传递（通常与 OPT_NAIVE_UTC 或 OPT_UTC_Z 结合使用，
-                                但这里可能依赖 orjson 的默认行为或后续处理）。
-    - OPT_APPEND_NEWLINE: 在末尾附加换行符，适用于 SSE。
-    """
     return orjson.dumps(
         data,
         option=orjson.OPT_NON_STR_KEYS | orjson.OPT_PASSTHROUGH_DATETIME | orjson.OPT_APPEND_NEWLINE
@@ -35,9 +53,6 @@ def error_response(
     request_id: Optional[str] = None,
     headers: Optional[Dict[str, str]] = None
 ) -> JSONResponse:
-    """
-    创建并记录一个标准的错误 JSON响应。
-    """
     log_msg = f"错误 {code}: {msg}"
     if request_id:
         log_msg = f"RID-{request_id}: {log_msg}"
@@ -52,83 +67,50 @@ def error_response(
     )
 
 def strip_potentially_harmful_html_and_normalize_newlines(text: str) -> str:
-    """
-    清理文本：移除潜在有害的HTML标签（script, style），转换<br>, <p>标签为换行，
-    并规范化连续的换行符和行首尾空格。
-    """
     if not isinstance(text, str):
-        # 如果输入不是字符串（例如 None），返回空字符串以避免后续处理错误
         return ""
-    
-    current_logger = logging.getLogger("EzTalkProxy.SPHASANN") # Specific logger for this function
+    current_logger = logging.getLogger("EzTalkProxy.SPHASANN")
     current_logger.debug(f"Input (first 200 chars): '{text[:200]}'")
-
-    # 步骤 1: 移除 <script> 和 <style> 标签及其内容
     text_before_script_style_strip = text
     text = re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
     if text != text_before_script_style_strip:
         current_logger.debug(f"SPHASANN Step 1 (script/style strip): Applied. Text (first 200 chars): '{text[:200]}'")
-    
-    # 步骤 2: HTML <br> 和 <p> 标签规范化为换行符
     text_before_html_br_p_norm = text
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)      # <br> 替换为 \n
-    text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)    # </p> 替换为 \n\n
-    text = re.sub(r"<p[^>]*>", "", text, flags=re.IGNORECASE)        # 移除 <p>起始标签
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<p[^>]*>", "", text, flags=re.IGNORECASE)
     if text != text_before_html_br_p_norm:
         current_logger.debug(f"SPHASANN Step 2 (HTML br/p norm): Applied. Text (first 200 chars): '{text[:200]}'")
-
-    # 步骤 3: 处理特定分隔符前缀，确保其前后有适当的换行
-    separator_prefix_pattern_regex = r"\s*(---###)" # 匹配可选的前导空格和 "---###"
+    separator_prefix_pattern_regex = r"\s*(---###)"
     text_before_prefix_sep_processing = text
-    # 在 "---###" 前强制添加两个换行符，移除其前导空格
     text = re.sub(separator_prefix_pattern_regex, r"\n\n\1", text) 
     if text != text_before_prefix_sep_processing:
         current_logger.debug(f"SPHASANN Step 3 (---### prefix normalization): Applied. Text (first 200 chars): '{text[:200]}'")
-
-    # 步骤 4: 合并多个连续换行符为一个或两个换行符
     text_before_collapse_newlines = text
-    text = re.sub(r"\n{3,}", "\n\n", text) # 3个或更多 \n 替换为 \n\n
+    text = re.sub(r"\n{3,}", "\n\n", text)
     if text != text_before_collapse_newlines:
         current_logger.debug(f"SPHASANN Step 4 (collapse \\n{{3,}} to \\n\\n): Applied. Text (first 200 chars): '{text[:200]}'")
-
-    # 步骤 5: 去除每行的首尾空格
     lines = text.split('\n')
     stripped_lines = [line.strip() for line in lines]
     text_after_line_stripping = "\n".join(stripped_lines)
     if text != text_after_line_stripping: 
         current_logger.debug(f"SPHASANN Step 5 (line stripping & rejoin): Applied. Text (first 200 chars): '{text_after_line_stripping[:200]}'")
     text = text_after_line_stripping
-    
-    # 最终文本
     final_text = text 
     current_logger.debug(f"SPHASANN Final output (first 200 chars): '{final_text[:200]}'")
     return final_text
 
-
 def extract_sse_lines(buffer: bytearray) -> Tuple[List[bytes], bytearray]:
-    """
-    从字节缓冲区中提取所有完整的SSE（Server-Sent Events）行。
-    处理 '\n' 分隔的行，并移除可选的 '\r'。
-    如果行长度超过 MAX_SSE_LINE_LENGTH，则跳过该行并记录警告。
-    """
     lines: List[bytes] = []
     start_index: int = 0
     buffer_len = len(buffer)
-
     while start_index < buffer_len:
         newline_index = buffer.find(b'\n', start_index)
-        
         if newline_index == -1:
-            # 没有找到换行符，剩余部分是不完整的行
             break
-        
-        # 提取行，不包括换行符
         line = buffer[start_index:newline_index]
-        
-        # 移除行尾可能存在的回车符 '\r'
         if line.endswith(b'\r'):
             line = line[:-1]
-            
         if len(line) > MAX_SSE_LINE_LENGTH:
             logger.warning(
                 f"SSE line too long ({len(line)} bytes), exceeded MAX_SSE_LINE_LENGTH ({MAX_SSE_LINE_LENGTH}). Line skipped. "
@@ -136,23 +118,153 @@ def extract_sse_lines(buffer: bytearray) -> Tuple[List[bytes], bytearray]:
             )
         else:
             lines.append(line)
-            
-        start_index = newline_index + 1 # 移动到下一行的开始
-        
-    return lines, buffer[start_index:] # 返回提取的行列表和缓冲区中剩余的部分
-
+        start_index = newline_index + 1
+    return lines, buffer[start_index:]
 
 def get_current_time_iso() -> str:
-    """
-    获取当前 UTC 时间的 ISO 8601 格式字符串，并以 'Z' 结尾表示 UTC。
-    """
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 def is_gemini_2_5_model(model_name: str) -> bool:
-    """
-    简单判断模型名称是否包含 "gemini-2.5"，用于识别 Gemini 2.5 系列模型。
-    不区分大小写。
-    """
-    if not isinstance(model_name, str): # 防御性检查，确保 model_name 是字符串
+    if not isinstance(model_name, str):
         return False
     return "gemini-2.5" in model_name.lower()
+
+# --- 新增：文档处理辅助函数 ---
+
+def _extract_text_from_pdf_pypdf2(file_path: str) -> Optional[str]:
+    """使用 PyPDF2 从 PDF 文件中提取文本。"""
+    if not PyPDF2:
+        logger.warning("Attempted to extract PDF text, but PyPDF2 library is not available.")
+        return None
+    text_content = ""
+    try:
+        with open(file_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            if reader.is_encrypted:
+                try:
+                    # 尝试用空密码解密，对某些保护性PDF可能有效
+                    if reader.decrypt("") == PyPDF2.PasswordType.OWNER_PASSWORD or \
+                       reader.decrypt("") == PyPDF2.PasswordType.USER_PASSWORD :
+                        logger.info(f"Successfully decrypted PDF (with empty password): {file_path}")
+                    else:
+                        logger.warning(f"PDF file is encrypted and could not be decrypted with an empty password: {file_path}")
+                        return None # Or some indicator of encryption
+                except Exception as decrypt_err:
+                    logger.warning(f"Failed to decrypt PDF {file_path}: {decrypt_err}")
+                    return None
+
+            for page in reader.pages:
+                try:
+                    text_content += page.extract_text() or "" # Add "or """ to handle None from extract_text
+                except Exception as page_extract_err:
+                    logger.warning(f"Error extracting text from a page in {file_path}: {page_extract_err}")
+                    continue # 继续处理下一页
+        return text_content.strip()
+    except FileNotFoundError:
+        logger.error(f"PDF file not found for extraction: {file_path}")
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting text from PDF {file_path} using PyPDF2: {e}", exc_info=True)
+        return None
+
+def _extract_text_from_docx_python_docx(file_path: str) -> Optional[str]:
+    """使用 python-docx 从 DOCX 文件中提取文本。"""
+    if not docx:
+        logger.warning("Attempted to extract DOCX text, but python-docx library is not available.")
+        return None
+    try:
+        doc_obj = docx.Document(file_path)
+        full_text = [para.text for para in doc_obj.paragraphs]
+        return "\n".join(full_text).strip()
+    except FileNotFoundError:
+        logger.error(f"DOCX file not found for extraction: {file_path}")
+        return None
+    except Exception as e:
+        logger.error(f"Error extracting text from DOCX {file_path} using python-docx: {e}", exc_info=True)
+        return None
+
+def _extract_text_from_plain_text(file_path: str) -> Optional[str]:
+    """从纯文本文件中提取文本 (尝试多种编码)。"""
+    common_encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'iso-8859-1'] # 可以根据需要调整
+    try:
+        for encoding in common_encodings:
+            try:
+                with open(file_path, "r", encoding=encoding) as f:
+                    return f.read().strip()
+            except UnicodeDecodeError:
+                logger.debug(f"Failed to decode plain text file {file_path} with encoding {encoding}")
+                continue
+            except FileNotFoundError:
+                logger.error(f"Plain text file not found for extraction: {file_path}")
+                return None
+        logger.warning(f"Could not decode plain text file {file_path} with common encodings.")
+        return None # 如果所有尝试都失败
+    except Exception as e:
+        logger.error(f"Error extracting text from plain text file {file_path}: {e}", exc_info=True)
+        return None
+
+async def extract_text_from_uploaded_document(
+    uploaded_file_path: str,
+    mime_type: Optional[str],
+    original_filename: str
+) -> Optional[str]:
+    """
+    根据MIME类型从上传的文档（已保存到临时路径）中提取文本。
+    返回提取的文本或None（如果不支持或提取失败）。
+    """
+    logger.info(f"Attempting to extract text from '{original_filename}' (path: {uploaded_file_path}, mime: {mime_type})")
+    
+    # 优先使用传入的 MIME 类型，如果它在支持列表中
+    effective_mime_type = mime_type.lower() if mime_type else None
+
+    # （可选）如果 mime_type 不可靠或未知，可以使用 python-magic 进行更准确的检测
+    # if magic and (not effective_mime_type or effective_mime_type == "application/octet-stream"):
+    #     try:
+    #         detected_mime = magic.from_file(uploaded_file_path, mime=True)
+    #         if detected_mime and detected_mime != effective_mime_type:
+    #             logger.info(f"MIME type detected by python-magic for '{original_filename}': {detected_mime} (original: {mime_type})")
+    #             effective_mime_type = detected_mime.lower()
+    #     except Exception as e_magic:
+    #         logger.warning(f"Error using python-magic for '{original_filename}': {e_magic}")
+
+    if not effective_mime_type:
+        logger.warning(f"No effective MIME type for '{original_filename}', cannot determine extraction method.")
+        return None
+
+    extracted_text: Optional[str] = None
+
+    if effective_mime_type in SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION:
+        if effective_mime_type == "application/pdf":
+            extracted_text = _extract_text_from_pdf_pypdf2(uploaded_file_path)
+        elif effective_mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            extracted_text = _extract_text_from_docx_python_docx(uploaded_file_path)
+        elif effective_mime_type == "application/msword": # .doc 文件
+            # .doc 文件提取比较麻烦，通常需要 unoconv (依赖 LibreOffice) 或其他特定库
+            # 这里暂时返回一个提示，或尝试简单的文本提取（如果文件内容是纯文本）
+            logger.warning(f"Basic text extraction for .doc ('{original_filename}') is not robust. Full content might not be extracted.")
+            extracted_text = _extract_text_from_plain_text(uploaded_file_path) # 尝试作为纯文本读取
+            if not extracted_text:
+                 extracted_text = "[后端提示：.doc 文件内容提取可能不完整或失败]"
+        elif effective_mime_type.startswith("text/"): # 包括 text/plain, text/markdown, text/csv 等
+            extracted_text = _extract_text_from_plain_text(uploaded_file_path)
+        # 你可以在这里添加对其他 SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION 中类型的处理
+        # 例如: CSV 或 Markdown 可能需要不同的处理方式或直接使用文本
+        else:
+            logger.info(f"MIME type '{effective_mime_type}' for '{original_filename}' is in supported list but no specific extractor implemented, attempting plain text.")
+            extracted_text = _extract_text_from_plain_text(uploaded_file_path)
+    else:
+        logger.warning(f"Unsupported MIME type for text extraction: '{effective_mime_type}' for file '{original_filename}'.")
+        return None
+
+    if extracted_text:
+        if len(extracted_text) > MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT:
+            logger.info(f"Extracted text from '{original_filename}' truncated from {len(extracted_text)} to {MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT} characters.")
+            extracted_text = extracted_text[:MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT] + \
+                             f"\n[内容已截断，原始长度超过 {MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT} 字符]"
+        logger.info(f"Successfully extracted text (len: {len(extracted_text)}) from '{original_filename}'.")
+        return extracted_text.strip()
+    else:
+        logger.warning(f"Failed to extract text from '{original_filename}' (mime: {effective_mime_type}).")
+        return None
+
+# --- 文档处理辅助函数结束 ---

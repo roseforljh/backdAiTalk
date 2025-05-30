@@ -1,32 +1,39 @@
 # FastAPI & Uvicorn
 fastapi>=0.100.0
-uvicorn[standard]>=0.23.0 # standard extras include watchfiles, python-dotenv, etc.
+uvicorn[standard]>=0.23.0
 
 # HTTP Client
-httpx[http2]>=0.25.0 # for making async HTTP requests, with HTTP/2 support
+httpx[http2]>=0.25.0
 
 # JSON processing
-orjson>=3.8.0 # Faster JSON library
+orjson>=3.8.0
 
-# Google Cloud / Vertex AI / Gemini
-google-cloud-aiplatform>=1.45.0 # <-- 这个库提供了 vertexai 模块，是与Vertex AI Gemini交互的核心
-# google-auth 会作为 google-cloud-aiplatform 的依赖自动安装，但明确指出也无妨
-google-auth>=2.20.0 # 用于Google Cloud认证
+# Google AI Related (保持你现有的，根据实际使用情况调整)
+# 如果你主要通过 REST API 与 Gemini 交互 (如 multimodal_chat.py 所示)，
+# 那么 google-cloud-aiplatform 和 google-auth 可能不是直接必需的，
+# 除非你项目其他地方用到了 Vertex AI SDK。
+# google-generativeai 是用于 Google AI Studio / Gemini API (非Vertex) 的 SDK。
+# 请根据你的实际 API 调用方式保留或调整。
+google-cloud-aiplatform>=1.45.0  # 如果使用 Vertex AI SDK
+google-auth>=2.20.0              # 通常作为 google-cloud-* 的依赖
+google-api-python-client         # 如果项目中其他地方用到
+google-generativeai>=0.5.0       # 如果直接调用 Google AI Gemini API (非Vertex)
 
-# (可选，但您列出了) Google API Client Library for Python
-# 这个是较老的客户端库，用于多种Google API。
-# 如果您项目中其他地方没有明确用到它，并且所有Gemini/Vertex AI交互都通过 google-cloud-aiplatform，
-# 那么这个可能不是严格必需的。但如果已在用，保留即可。
-google-api-python-client
-
-# Pydantic (FastAPI的依赖，但明确指定版本有助于确保兼容性，特别是V2特性)
+# Pydantic
 pydantic>=2.0.0
 
-google-generativeai>=0.5.0 # 或者您安装的具体版本
-
-# (可选，但推荐) 用于从 .env 文件加载环境变量
+# Environment variables
 python-dotenv>=1.0.0
 
-# (可选) 如果您的FastAPI应用需要处理文件上传(multipart/form-data)
-# python-multipart
+# FastAPI File Uploads (Multipart)
+python-multipart>=0.0.9 # <--- 确保这个存在并且版本较新
 
+# Document Processing Libraries
+PyPDF2>=3.0.0             # 用于 PDF 文件文本提取 (或者 pdfminer.six)
+python-docx>=1.1.0        # 用于 DOCX 文件文本提取
+# openpyxl>=3.1.0           # 如果要处理 XLSX 文件 (与 pandas 配合)
+# xlrd>=2.0.1               # 如果要处理旧版 XLS 文件 (与 pandas 配合)
+# pandas>=2.0.0             # 如果要从表格文件中提取数据并转换为文本
+
+# (可选) 更可靠的MIME类型检测
+# python-magic>=0.4.27      # 需要系统级 libmagic 库

@@ -2,39 +2,44 @@
 import os
 import logging
 import httpx
-import orjson
+import orjson # orjson 用于序列化和反序列化
+import asyncio # 用于异步操作
+import shutil # 用于文件操作
+import uuid # 用于生成唯一文件名
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
-from fastapi import APIRouter, Depends, Request, HTTPException
+from fastapi import APIRouter, Depends, Request, HTTPException, File, UploadFile, Form # 新增 File, UploadFile, Form
 from fastapi.responses import StreamingResponse
 
 # 使用绝对导入
 from eztalk_proxy.models import (
-    ChatRequestModel,
-    SimpleTextApiMessagePy, # Assuming this is for non-Gemini or non-Google-provider Gemini
-    PartsApiMessagePy,      # Assuming this is for Google-provider Gemini
+    ChatRequestModel, # 将用于Form参数，如果ChatRequestModel本身不适合multipart
+    SimpleTextApiMessagePy,
+    PartsApiMessagePy,
     AppStreamEventPy
-    # AbstractApiMessagePy, # If ChatRequestModel.messages is List[AbstractApiMessagePy]
 )
-from eztalk_proxy.config import COMMON_HEADERS # GOOGLE_API_BASE_URL might not be needed here directly
+from eztalk_proxy.config import ( # 确保从config导入所有需要的配置
+    COMMON_HEADERS,
+    TEMP_UPLOAD_DIR, # 文档处理
+    MAX_DOCUMENT_UPLOAD_SIZE_MB, # 文档处理
+    MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT, # 文档处理
+    API_TIMEOUT # 新增导入，用于 httpx.stream 的 timeout
+)
 from eztalk_proxy.utils import (
     extract_sse_lines,
     get_current_time_iso,
     orjson_dumps_bytes_wrapper,
-    strip_potentially_harmful_html_and_normalize_newlines
+    strip_potentially_harmful_html_and_normalize_newlines,
+    extract_text_from_uploaded_document # 新增文档文本提取函数
 )
-# api_helpers for OpenAI compatible paths
 from eztalk_proxy.api_helpers import prepare_openai_request
-# multimodal_router for Google provider Gemini via REST API
-from eztalk_proxy.routers import multimodal_chat as multimodal_router
-# stream_processors for OpenAI compatible paths
+from eztalk_proxy.routers import multimodal_chat as multimodal_router # 用于Gemini REST分发
 from eztalk_proxy.stream_processors import (
-    process_openai_like_sse_stream, # Or your specific OpenAI response processor
+    process_openai_like_sse_stream,
     handle_stream_error,
     handle_stream_cleanup,
     should_apply_custom_separator_logic
 )
-# Web search (if applicable to non-Gemini paths)
 from eztalk_proxy.web_search import perform_web_search, generate_search_context_message_content
 
 logger = logging.getLogger("EzTalkProxy.Routers.Chat")
@@ -51,104 +56,209 @@ async def get_http_client(request: Request) -> httpx.AsyncClient:
 # --- 主聊天代理端点 ---
 @router.post("/chat", response_class=StreamingResponse, summary="AI聊天完成代理", tags=["AI Proxy"])
 async def chat_proxy_entrypoint(
-    chat_input: ChatRequestModel, # Uses Pydantic model with discriminated union for messages
-    fastapi_request_obj: Request,
-    http_client: httpx.AsyncClient = Depends(get_http_client)
+    fastapi_request_obj: Request, # <--- 移到前面以解决 SyntaxError
+    chat_request_json: str = Form(...),
+    http_client: httpx.AsyncClient = Depends(get_http_client),
+    uploaded_documents: List[UploadFile] = File(default_factory=list)
 ):
     request_id = os.urandom(8).hex()
     log_prefix = f"RID-{request_id}"
 
+    try:
+        chat_input_data = orjson.loads(chat_request_json)
+        chat_input = ChatRequestModel(**chat_input_data)
+        logger.info(f"{log_prefix}: Parsed chat_request_json successfully.")
+    except orjson.JSONDecodeError as e_json:
+        logger.error(f"{log_prefix}: Failed to parse chat_request_json: {e_json}. Data: {chat_request_json[:500]}")
+        raise HTTPException(status_code=400, detail=f"Invalid chat_request_json format: {e_json}")
+    except Exception as e_pydantic: # Catch Pydantic validation errors
+        logger.error(f"{log_prefix}: Failed to validate ChatRequestModel from JSON: {e_pydantic}. Data: {chat_request_json[:500]}")
+        raise HTTPException(status_code=400, detail=f"Invalid data for ChatRequestModel: {e_pydantic}")
+
     logger.info(
         f"{log_prefix}: Received /chat request: Provider='{chat_input.provider}', "
-        f"Model='{chat_input.model}', WebSearch={chat_input.use_web_search}"
+        f"Model='{chat_input.model}', WebSearch={chat_input.use_web_search}, "
+        f"Uploaded Documents Count: {len(uploaded_documents)}"
     )
 
-    # --- Core Dispatch Logic ---
-    # Only if provider is "google" AND model name starts with "gemini", use the Gemini REST API multimodal handler
+    processed_document_text_parts: List[str] = []
+    temp_files_to_delete: List[str] = []
+
+    if uploaded_documents:
+        logger.info(f"{log_prefix}: Processing {len(uploaded_documents)} uploaded document(s).")
+        for doc_file in uploaded_documents:
+            if not doc_file.filename:
+                logger.warning(f"{log_prefix}: Skipping uploaded file with no filename.")
+                try: await doc_file.close() # Ensure file is closed even if skipped
+                except Exception: pass
+                continue
+
+            file_too_large = False
+            if hasattr(doc_file, 'size') and doc_file.size is not None:
+                if doc_file.size > MAX_DOCUMENT_UPLOAD_SIZE_MB * 1024 * 1024:
+                    logger.warning(f"{log_prefix}: Document '{doc_file.filename}' (size: {doc_file.size} B) exceeds max size "
+                                   f"({MAX_DOCUMENT_UPLOAD_SIZE_MB} MB). Skipping.")
+                    file_too_large = True
+            else:
+                logger.info(f"{log_prefix}: Could not determine size of '{doc_file.filename}' before saving. Proceeding with caution.")
+
+            if file_too_large:
+                try: await doc_file.close()
+                except Exception: pass
+                continue
+
+            _, file_extension = os.path.splitext(doc_file.filename)
+            if not file_extension: file_extension = ".tmp"
+            safe_original_filename_part = "".join(c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in doc_file.filename.rsplit('.', 1)[0])[:50]
+            temp_filename = f"{request_id}_{safe_original_filename_part}_{uuid.uuid4().hex[:8]}{file_extension}"
+            temp_file_path = os.path.join(TEMP_UPLOAD_DIR, temp_filename)
+            
+            try:
+                logger.debug(f"{log_prefix}: Saving uploaded document '{doc_file.filename}' to '{temp_file_path}'. MIME: {doc_file.content_type}")
+                with open(temp_file_path, "wb") as buffer:
+                    shutil.copyfileobj(doc_file.file, buffer)
+                temp_files_to_delete.append(temp_file_path)
+
+                document_text = await extract_text_from_uploaded_document(
+                    temp_file_path,
+                    doc_file.content_type,
+                    doc_file.filename
+                )
+                if document_text:
+                    doc_text_part = f"\n\n--- 来自文档: {doc_file.filename} ---\n{document_text}\n--- 文档结束: {doc_file.filename} ---\n"
+                    processed_document_text_parts.append(doc_text_part)
+                    logger.info(f"{log_prefix}: Successfully extracted and processed text from '{doc_file.filename}'. Length: {len(document_text)}")
+                else:
+                    logger.warning(f"{log_prefix}: Failed to extract text or no text found in '{doc_file.filename}'.")
+            except Exception as e_doc_proc:
+                logger.error(f"{log_prefix}: Error processing uploaded document '{doc_file.filename}': {e_doc_proc}", exc_info=True)
+            finally:
+                await doc_file.close()
+    
+    combined_document_text_for_prompt = "".join(processed_document_text_parts)
+
     if chat_input.provider.lower() == "google" and chat_input.model.lower().startswith("gemini"):
         logger.info(f"{log_prefix}: Provider is 'google' and model '{chat_input.model}' is Gemini. Dispatching to Gemini REST API multimodal handler.")
-        # Frontend should send PartsApiMessagePy for this route
-        return await multimodal_router.handle_gemini_request_entry(
-            gemini_chat_input=chat_input,
-            raw_request=fastapi_request_obj,
-            http_client=http_client, # multimodal_router might use this if it makes direct calls (though current one doesn't)
-            request_id=request_id
+        return StreamingResponse(
+            multimodal_router.generate_gemini_rest_api_events_with_docs(
+                gemini_chat_input=chat_input,
+                fastapi_request_obj=fastapi_request_obj,
+                http_client=http_client,
+                request_id=request_id,
+                extracted_document_text=combined_document_text_for_prompt,
+                temp_files_to_delete_after_stream=temp_files_to_delete
+            ),
+            media_type="text/event-stream",
+            headers=COMMON_HEADERS
         )
     else:
-        # All other cases (non-Gemini models, or Gemini models via non-"google" providers)
-        # will be handled by a generic path, typically OpenAI compatible.
-        logger.info(f"{log_prefix}: Model '{chat_input.model}' with provider '{chat_input.provider}' will be handled by non-Gemini-REST path (e.g., OpenAI compatible).")
+        logger.info(f"{log_prefix}: Model '{chat_input.model}' with provider '{chat_input.provider}' will be handled by non-Gemini-REST path.")
         
         simple_text_messages_for_upstream: List[Dict[str, Any]] = []
         user_query_for_search = ""
+        original_user_text_found = False
 
         for i, msg_abstract in enumerate(chat_input.messages):
-            # Expect SimpleTextApiMessagePy for this path from frontend
+            current_message_content = ""
+            is_last_user_message = False
+
             if isinstance(msg_abstract, SimpleTextApiMessagePy):
-                msg_dict = {"role": msg_abstract.role, "content": msg_abstract.content or ""}
-                if msg_abstract.role == "user" and msg_abstract.content:
-                    user_query_for_search = msg_abstract.content.strip()
+                current_message_content = msg_abstract.content or ""
+                msg_dict = {"role": msg_abstract.role, "content": current_message_content}
                 
-                # Handle tool calls if SimpleTextApiMessagePy supports them
+                if msg_abstract.role == "user":
+                    original_user_text_found = True
+                    user_query_for_search = current_message_content.strip()
+                    if i == len(chat_input.messages) - 1:
+                        is_last_user_message = True
+                
                 if hasattr(msg_abstract, 'tool_calls') and msg_abstract.tool_calls:
                     msg_dict["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in msg_abstract.tool_calls]
                 if msg_abstract.role == "tool":
                     if hasattr(msg_abstract, 'tool_call_id') and msg_abstract.tool_call_id: msg_dict["tool_call_id"] = msg_abstract.tool_call_id
-                    if msg_abstract.name: msg_dict["name"] = msg_abstract.name # OpenAI tool role needs name
+                    if msg_abstract.name: msg_dict["name"] = msg_abstract.name
+                
+                if is_last_user_message and combined_document_text_for_prompt:
+                    logger.info(f"{log_prefix}: Appending combined document text to the last user message (SimpleText) for non-Gemini path.")
+                    msg_dict["content"] = (current_message_content + "\n" + combined_document_text_for_prompt).strip()
+                    user_query_for_search = msg_dict["content"]
                 
                 simple_text_messages_for_upstream.append(msg_dict)
 
             elif isinstance(msg_abstract, PartsApiMessagePy):
-                # Fallback: If PartsApiMessagePy is received on this path, try to extract text
-                logger.warning(f"{log_prefix}: Non-Gemini-REST path received PartsApiMessage for model '{chat_input.model}' (provider: {chat_input.provider}). Extracting text.")
+                logger.warning(f"{log_prefix}: Non-Gemini-REST path received PartsApiMessage. Extracting text.")
                 text_from_parts = ""
-                for part_model in msg_abstract.parts: # part_model is PyTextContentPart etc.
+                for part_model in msg_abstract.parts:
                     if hasattr(part_model, 'text') and isinstance(part_model.text, str):
                          text_from_parts += part_model.text + " "
                 
-                if text_from_parts.strip():
-                    simple_text_messages_for_upstream.append({"role": msg_abstract.role, "content": text_from_parts.strip()})
+                current_message_content = text_from_parts.strip()
+                if current_message_content:
                     if msg_abstract.role == "user":
-                        user_query_for_search = text_from_parts.strip()
+                        original_user_text_found = True
+                        user_query_for_search = current_message_content
+                        if i == len(chat_input.messages) - 1:
+                            is_last_user_message = True
+
+                    if is_last_user_message and combined_document_text_for_prompt:
+                        logger.info(f"{log_prefix}: Appending combined document text to the last user message (from Parts) for non-Gemini path.")
+                        current_message_content = (current_message_content + "\n" + combined_document_text_for_prompt).strip()
+                        user_query_for_search = current_message_content
+                    
+                    simple_text_messages_for_upstream.append({"role": msg_abstract.role, "content": current_message_content})
                 else:
-                    logger.warning(f"{log_prefix}: Could not extract text from PartsApiMessage for '{chat_input.model}' on non-Gemini-REST path. Skipping.")
+                    logger.warning(f"{log_prefix}: Could not extract text from PartsApiMessage for non-Gemini-REST path. Skipping.")
             else:
-                logger.error(f"{log_prefix}: Unknown message type '{type(msg_abstract)}' in messages list for non-Gemini-REST path. Skipping.")
+                logger.error(f"{log_prefix}: Unknown message type '{type(msg_abstract)}' for non-Gemini-REST path. Skipping.")
+
+        if not original_user_text_found and combined_document_text_for_prompt:
+            logger.info(f"{log_prefix}: No original user text found, but document text exists. Creating a new user message with document content for non-Gemini path.")
+            new_user_content_with_docs = f"请基于以下文档内容进行处理或回答：\n{combined_document_text_for_prompt}"
+            simple_text_messages_for_upstream.append({
+                "role": "user",
+                "content": new_user_content_with_docs
+            })
+            user_query_for_search = new_user_content_with_docs
 
         if not simple_text_messages_for_upstream or not any(m.get("role") != "system" for m in simple_text_messages_for_upstream):
             if not any(m.get("role") == "system" and m.get("content") for m in simple_text_messages_for_upstream):
-                logger.warning(f"{log_prefix}: No processable non-system messages for '{chat_input.model}' on non-Gemini-REST path.")
+                logger.warning(f"{log_prefix}: No processable non-system messages for non-Gemini-REST path.")
                 async def no_msg_gen_err():
                     yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message="No processable messages for this model.", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
                     yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason="bad_request", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+                    for temp_file in temp_files_to_delete:
+                        if os.path.exists(temp_file):
+                            try: os.remove(temp_file)
+                            except Exception as e_del_err: logger.error(f"{log_prefix}: Error deleting temp file {temp_file} in no_msg_gen_err: {e_del_err}")
                 return StreamingResponse(no_msg_gen_err(), media_type="text/event-stream", headers=COMMON_HEADERS)
         
         return StreamingResponse(
             generate_non_gemini_events(
-                chat_input,
-                simple_text_messages_for_upstream,
-                user_query_for_search,
-                http_client,
-                fastapi_request_obj,
-                request_id
+                request_data=chat_input,
+                processed_upstream_messages=simple_text_messages_for_upstream,
+                user_query_for_search=user_query_for_search,
+                http_client=http_client,
+                fastapi_request_obj=fastapi_request_obj,
+                request_id=request_id,
+                temp_files_to_delete_after_stream=temp_files_to_delete
             ),
             media_type="text/event-stream",
             headers=COMMON_HEADERS
         )
 
 async def generate_non_gemini_events(
-    request_data: ChatRequestModel, # Original request data for API key, model, temp, etc.
-    processed_upstream_messages: List[Dict[str, Any]], # Messages formatted for the upstream API
-    user_query_for_search: str, # Last user query for web search
+    request_data: ChatRequestModel,
+    processed_upstream_messages: List[Dict[str, Any]],
+    user_query_for_search: str,
     http_client: httpx.AsyncClient,
     fastapi_request_obj: Request,
-    request_id: str
+    request_id: str,
+    temp_files_to_delete_after_stream: List[str]
 ) -> AsyncGenerator[bytes, None]:
     log_prefix = f"RID-{request_id}"
-    final_messages_for_llm = list(processed_upstream_messages) # Create a mutable copy
+    final_messages_for_llm = list(processed_upstream_messages)
     search_results_generated_this_time = False
 
-    # --- Web Search (if enabled for this non-Gemini path) ---
     if request_data.use_web_search and user_query_for_search:
         logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search initiated for query: '{user_query_for_search[:100]}'")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_search_started", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
@@ -159,7 +269,6 @@ async def generate_non_gemini_events(
             search_context_content = generate_search_context_message_content(user_query_for_search, search_results_list)
             new_system_message_dict = {"role": "system", "content": search_context_content}
             
-            # Intelligent insertion of system message (e.g., before last user message or at start)
             last_user_idx = -1
             for i, msg in reversed(list(enumerate(final_messages_for_llm))):
                 if msg.get("role") == "user":
@@ -167,7 +276,7 @@ async def generate_non_gemini_events(
                     break
             if last_user_idx != -1:
                 final_messages_for_llm.insert(last_user_idx, new_system_message_dict)
-            else: # If no user message (unlikely but safe)
+            else:
                 final_messages_for_llm.insert(0, new_system_message_dict)
             
             search_results_generated_this_time = True
@@ -178,8 +287,6 @@ async def generate_non_gemini_events(
             logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search yielded no results for query '{user_query_for_search[:100]}'.")
             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_search_complete_no_results", query=user_query_for_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
         
-        
-    # --- Prepare API request (e.g., for OpenAI compatible endpoints) ---
     try:
         current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
             request_data=request_data,
@@ -190,9 +297,12 @@ async def generate_non_gemini_events(
         logger.error(f"{log_prefix}: Error preparing non-Gemini-REST request: {e_prepare}", exc_info=True)
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=f"Request preparation error: {e_prepare}", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason="request_error", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+        for temp_file in temp_files_to_delete_after_stream:
+            if os.path.exists(temp_file):
+                try: os.remove(temp_file)
+                except Exception as e_del_prep: logger.error(f"{log_prefix}: Error deleting temp file {temp_file} after prep error: {e_del_prep}")
         return
 
-    # --- Stream request and process SSE ---
     buffer = bytearray()
     upstream_ok_flag = False
     first_chunk_llm_received = False
@@ -203,21 +313,17 @@ async def generate_non_gemini_events(
         "final_finish_event_sent_by_llm_reason": False,
         "final_finish_event_sent_flag_for_cleanup": False
     }
-    # Determine if custom separator logic should be used (based on your stream_processors.py)
-    # For a generic OpenAI path, this is usually False unless specific models require it.
     use_old_custom_separator_branch_flag = should_apply_custom_separator_logic(
-        request_data, request_id,
-        False, # is_google_like_path (this is the non-Google path)
-        False  # is_native_thinking_active (not applicable here)
+        request_data, request_id, False, False
     )
 
     try:
-        logger.debug(f"{log_prefix}: (Non-Gemini-REST) Sending to URL: {current_api_url}. Payload (first 500 of messages): {str(current_api_payload.get('messages',[]))[:500]}")
+        logger.debug(f"{log_prefix}: (Non-Gemini-REST) Sending to URL: {current_api_url}. Messages (content preview): {[str(m.get('content',''))[:70] + ('...' if len(str(m.get('content','')))>70 else '') for m in current_api_payload.get('messages',[])]}")
         async with http_client.stream(
             "POST", current_api_url,
             headers=current_api_headers,
             json=current_api_payload,
-            timeout=300.0
+            timeout=API_TIMEOUT
         ) as response:
             logger.info(f"{log_prefix}: (Non-Gemini-REST) Upstream LLM response status: {response.status_code}")
             if not (200 <= response.status_code < 300):
@@ -226,8 +332,7 @@ async def generate_non_gemini_events(
                 logger.error(f"{log_prefix}: (Non-Gemini-REST) Upstream LLM error {response.status_code}: {err_text[:1000]}")
                 yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=f"LLM API Error: {err_text[:200]}", upstream_status=response.status_code, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
                 upstream_ok_flag = False
-                # Cleanup will send the finish event
-                return
+                return 
 
             upstream_ok_flag = True
             async for raw_chunk_bytes in response.aiter_raw():
@@ -236,7 +341,7 @@ async def generate_non_gemini_events(
                     break
                 
                 if not first_chunk_llm_received:
-                    if request_data.use_web_search and user_query_for_search: # Send web_analysis_complete after first LLM chunk
+                    if request_data.use_web_search and user_query_for_search:
                         stage_after_search = "web_analysis_complete" if search_results_generated_this_time else "web_analysis_skipped_no_results"
                         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage=stage_after_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
                     first_chunk_llm_received = True
@@ -251,17 +356,14 @@ async def generate_non_gemini_events(
                         sse_data_bytes = sse_line_bytes[len(b"data: "):].strip()
                     if not sse_data_bytes: continue
                     
-                    logger.debug(f"{log_prefix}: (Non-Gemini-REST) Raw SSE: {sse_data_bytes!r}")
-
-                    if sse_data_bytes == b"[DONE]": # OpenAI [DONE] signal
-                        logger.info(f"{log_prefix}: Received [DONE] from non-Gemini (OpenAI-like) endpoint.")
+                    if sse_data_bytes == b"[DONE]":
+                        logger.info(f"{log_prefix}: Received [DONE] from non-Gemini endpoint.")
                         stream_proc_state["final_finish_reason_from_llm"] = stream_proc_state.get("final_finish_reason_from_llm","stop")
                         stream_proc_state["final_finish_event_sent_by_llm_reason"] = True
                         break 
 
                     try:
                         parsed_sse_data = orjson.loads(sse_data_bytes)
-                        logger.debug(f"{log_prefix}: (Non-Gemini-REST) Parsed SSE: {parsed_sse_data}")
                         async for event_dict in process_openai_like_sse_stream(parsed_sse_data, stream_proc_state, request_id):
                             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event_dict).model_dump(by_alias=True, exclude_none=True))
                             if event_dict.get("type") == "finish" or stream_proc_state.get("final_finish_event_sent_by_llm_reason"):
@@ -274,25 +376,31 @@ async def generate_non_gemini_events(
                 if stream_proc_state.get("final_finish_event_sent_by_llm_reason"):
                     break
             
-            # If loop finishes and LLM hasn't sent a finish reason (e.g. stream just ends)
             if not stream_proc_state.get("final_finish_event_sent_by_llm_reason") and not stream_proc_state.get("final_finish_event_sent_flag_for_cleanup"):
                 logger.info(f"{log_prefix}: (Non-Gemini-REST) Stream ended without explicit LLM finish signal.")
-                # The cleanup function will handle sending the final "finish" event.
 
     except httpx.RequestError as e_req:
         logger.error(f"{log_prefix}: httpx.RequestError for non-Gemini model '{request_data.model}': {e_req}", exc_info=True)
         async for event_bytes in handle_stream_error(e_req, request_id, upstream_ok_flag, first_chunk_llm_received): yield event_bytes
-        stream_proc_state["final_finish_event_sent_flag_for_cleanup"] = True # Mark that error handler sent finish
+        stream_proc_state["final_finish_event_sent_flag_for_cleanup"] = True
     except Exception as e_gen:
         logger.error(f"{log_prefix}: Generic error in non-Gemini stream for model '{request_data.model}': {e_gen}", exc_info=True)
         async for event_bytes in handle_stream_error(e_gen, request_id, upstream_ok_flag, first_chunk_llm_received): yield event_bytes
-        stream_proc_state["final_finish_event_sent_flag_for_cleanup"] = True # Mark that error handler sent finish
+        stream_proc_state["final_finish_event_sent_flag_for_cleanup"] = True
     finally:
         logger.info(f"{log_prefix}: Cleaning up non-Gemini stream for model '{request_data.model}'.")
-        # Pass the provider from request_data for logging in cleanup
         async for event_bytes in handle_stream_cleanup(
             stream_proc_state, request_id, upstream_ok_flag,
             use_old_custom_separator_branch_flag,
-            request_data.provider # Pass provider for logging/logic in cleanup
+            request_data.provider
         ):
             yield event_bytes
+        
+        logger.info(f"{log_prefix}: Deleting {len(temp_files_to_delete_after_stream)} temporary document file(s) for non-Gemini path.")
+        for temp_file in temp_files_to_delete_after_stream:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    logger.debug(f"{log_prefix}: Deleted temp file: {temp_file}")
+            except Exception as e_del:
+                logger.error(f"{log_prefix}: Error deleting temp file {temp_file}: {e_del}")
