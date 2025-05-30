@@ -67,7 +67,11 @@ async def generate_gemini_rest_api_events_with_docs(
             
             if new_parts_for_gemini or (is_user_message and not new_parts_for_gemini and not extracted_document_text and not original_user_text_found_in_parts):
                 copied_msg_parts = list(new_parts_for_gemini)
-                copied_msg = PartsApiMessagePy(role=msg_abstract.role, parts=copied_msg_parts)
+                copied_msg = PartsApiMessagePy(
+                    role=msg_abstract.role,
+                    parts=copied_msg_parts,
+                    message_type="parts_message" # Explicitly provide message_type
+                )
                 if hasattr(msg_abstract, 'name') and msg_abstract.name: copied_msg.name = msg_abstract.name
                 active_messages_for_llm.append(copied_msg)
 
@@ -78,9 +82,18 @@ async def generate_gemini_rest_api_events_with_docs(
         for i in range(len(active_messages_for_llm) - 1, -1, -1):
             if active_messages_for_llm[i].role == "user": last_user_message_index = i; break
         if last_user_message_index != -1:
+            logger.debug(f"{log_prefix}: (Gemini REST) Appending extracted document text part to existing last user message parts.")
             active_messages_for_llm[last_user_message_index].parts.append(doc_text_part)
         else:
-            new_user_message_with_doc = PartsApiMessagePy(role="user", parts=[PyTextContentPart(type="text_content", text="请基于以下文档内容进行处理或回答："), doc_text_part])
+            logger.info(f"{log_prefix}: (Gemini REST) No prior user message found, creating new user message with extracted document text.")
+            new_user_message_with_doc = PartsApiMessagePy(
+                role="user",
+                parts=[
+                    PyTextContentPart(type="text_content", text="请基于以下文档内容进行处理或回答："),
+                    doc_text_part
+                ],
+                message_type="parts_message" # Explicitly provide message_type
+            )
             active_messages_for_llm.append(new_user_message_with_doc)
         original_user_text_found_in_parts = True
 
@@ -99,7 +112,11 @@ async def generate_gemini_rest_api_events_with_docs(
         if search_results_list:
             search_context_content = generate_search_context_message_content(user_query_for_search_gemini, search_results_list)
             search_context_parts = [PyTextContentPart(type="text_content", text=search_context_content)]
-            search_context_api_message = PartsApiMessagePy(role="user", parts=search_context_parts)
+            search_context_api_message = PartsApiMessagePy(
+                role="user", 
+                parts=search_context_parts,
+                message_type="parts_message" # Explicitly provide message_type
+            )
             last_user_idx = -1
             for i, msg_abstract in reversed(list(enumerate(active_messages_for_llm))):
                 if msg_abstract.role == "user": last_user_idx = i; break
@@ -117,21 +134,26 @@ async def generate_gemini_rest_api_events_with_docs(
         if not gemini_chat_input.api_key:
             yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message="Gemini API Key未在请求中提供。", timestamp=get_current_time_iso()))
             final_finish_event_sent = True; yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="configuration_error", timestamp=get_current_time_iso())); return
+        
         temp_chat_input_for_prepare = gemini_chat_input.model_copy(deep=True) if hasattr(gemini_chat_input, 'model_copy') else gemini_chat_input.copy(deep=True)
         temp_chat_input_for_prepare.messages = active_messages_for_llm
+
         try:
             target_url, headers, json_payload = prepare_gemini_rest_api_request(chat_input=temp_chat_input_for_prepare, request_id=request_id)
         except Exception as e_prepare:
             yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message=f"请求准备错误: {e_prepare}", timestamp=get_current_time_iso()))
             final_finish_event_sent = True; yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="request_error", timestamp=get_current_time_iso())); return
+
         if not json_payload.get("contents"):
             has_any_user_input = any(msg.role == "user" and any(isinstance(p, PyTextContentPart) and p.text and p.text.strip() for p in msg.parts) for msg in active_messages_for_llm)
             if not has_any_user_input:
                  yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message="没有有效内容发送给Gemini模型。", timestamp=get_current_time_iso()))
                  final_finish_event_sent = True; yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="no_content_error", timestamp=get_current_time_iso())); return
             else: logger.error(f"{log_prefix}: (Gemini REST) Contents are empty in json_payload despite having user/document text. This is unexpected but proceeding.")
+        
         logger.info(f"{log_prefix}: (Gemini REST) Sending request to URL: {target_url.split('?key=')[0]}...") 
         logger.debug(f"{log_prefix}: (Gemini REST) Payload (contents preview): {[(c.get('role'), [p.get('text', 'NonTextPart')[:50] + '...' if len(p.get('text','')) > 50 else p.get('text','NonTextPart') for p in c.get('parts', [])]) for c in json_payload.get('contents', [])]}")
+        
         buffer = bytearray()
         async with http_client.stream("POST", target_url, headers=headers, json=json_payload, timeout=API_TIMEOUT) as response:
             logger.info(f"{log_prefix}: (Gemini REST) Upstream LLM response status: {response.status_code}")
@@ -139,7 +161,6 @@ async def generate_gemini_rest_api_events_with_docs(
                 err_body_bytes = await response.aread()
                 err_text = err_body_bytes.decode("utf-8", errors="replace")
                 logger.error(f"{log_prefix}: (Gemini REST) Upstream LLM error {response.status_code}: {err_text[:1000]}")
-                # ---修正的错误解析---
                 parsed_err_msg = err_text[:200]
                 try:
                     err_json = orjson.loads(err_text)
@@ -147,10 +168,10 @@ async def generate_gemini_rest_api_events_with_docs(
                 except orjson.JSONDecodeError:
                     logger.debug(f"{log_prefix}: (Gemini REST) Failed to parse error body as JSON: {err_text[:200]}")
                 except Exception as e_parse_err:
-                    logger.warning(f"{log_prefix}: (Gemini REST) Unexpected error parsing error body: {e_parse_err}")
-                # ---修正结束---
+                     logger.warning(f"{log_prefix}: (Gemini REST) Unexpected error parsing error body: {e_parse_err}")
                 yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message=f"LLM API Error: {parsed_err_msg}", upstream_status=response.status_code, timestamp=get_current_time_iso()))
                 final_finish_event_sent = True; yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="upstream_error", timestamp=get_current_time_iso())); return
+            
             async for raw_chunk_bytes in response.aiter_raw():
                 if await fastapi_request_obj.is_disconnected(): logger.info(f"{log_prefix}: (Gemini REST) Client disconnected."); break
                 if not first_chunk_received_from_llm:
