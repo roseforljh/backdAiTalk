@@ -10,10 +10,10 @@ from typing import Optional
 # 导入您的配置
 from .config import (
     APP_VERSION, API_TIMEOUT, READ_TIMEOUT, MAX_CONNECTIONS,
-    LOG_LEVEL_FROM_ENV, COMMON_HEADERS
+    LOG_LEVEL_FROM_ENV, COMMON_HEADERS,
+    TEMP_UPLOAD_DIR # <--- 新增导入 TEMP_UPLOAD_DIR
 )
 # 导入您的主聊天路由
-# /chat 端点将由 routers/chat.py 文件中的 router 对象定义和处理
 from .routers import chat as chat_router
 # multimodal_chat 模块中的逻辑将由 chat_router 内部根据模型名称调用
 
@@ -26,32 +26,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EzTalkProxy.Main")
 
-# 设置其他模块的日志级别 (如果需要)
+# 设置其他模块的日志级别
 logging.getLogger("EzTalkProxy.SPHASANN").setLevel(LOG_LEVEL_FROM_ENV.upper())
-for lib_logger_name in ["httpx", "httpcore", "googleapiclient.discovery_cache", "uvicorn.access", "watchfiles"]: # 添加 watchfiles
+for lib_logger_name in ["httpx", "httpcore", "googleapiclient.discovery_cache", "uvicorn.access", "watchfiles"]:
     logging.getLogger(lib_logger_name).setLevel(logging.WARNING)
-logging.getLogger("uvicorn.error").setLevel(logging.INFO) # Uvicorn 自身的错误日志级别
+logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 # --- 日志配置结束 ---
 
 
 # --- 应用生命周期管理 (Lifespan) ---
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
-    logger.info("Lifespan: 应用启动，开始初始化HTTP客户端...")
+    logger.info("Lifespan: 应用启动，开始初始化...")
     client_local: Optional[httpx.AsyncClient] = None
     try:
+        # 初始化 HTTP 客户端
         client_local = httpx.AsyncClient(
-            timeout=httpx.Timeout(API_TIMEOUT, read=READ_TIMEOUT),
-            limits=httpx.Limits(max_connections=MAX_CONNECTIONS),
+            timeout=httpx.Timeout(API_TIMEOUT, read=READ_TIMEOUT), # 使用 config.py 中的 API_TIMEOUT
+            limits=httpx.Limits(max_connections=MAX_CONNECTIONS), # 使用 config.py 中的 MAX_CONNECTIONS
             http2=True,
             follow_redirects=True,
-            trust_env=False # 明确设置，除非您特意需要系统代理
+            trust_env=False
         )
-        app_instance.state.http_client = client_local # 将客户端实例存储在 app.state 中
-        logger.info(f"Lifespan: HTTP客户端初始化成功。Timeout: {API_TIMEOUT}s, Read Timeout: {READ_TIMEOUT}s, Max Connections: {MAX_CONNECTIONS}")
+        app_instance.state.http_client = client_local
+        logger.info(f"Lifespan: HTTP客户端初始化成功。Timeout Connect: {API_TIMEOUT}s, Read Timeout: {READ_TIMEOUT}s, Max Connections: {MAX_CONNECTIONS}")
+
+        # --- 新增：检查并创建临时上传目录 ---
+        if not os.path.exists(TEMP_UPLOAD_DIR):
+            try:
+                os.makedirs(TEMP_UPLOAD_DIR)
+                logger.info(f"Lifespan: 成功创建临时上传目录: {TEMP_UPLOAD_DIR}")
+            except OSError as e_mkdir:
+                logger.error(f"Lifespan: 创建临时上传目录 {TEMP_UPLOAD_DIR} 失败: {e_mkdir}", exc_info=True)
+                # 你可能想在这里决定如果目录创建失败是否要阻止应用启动
+                # 例如: raise RuntimeError(f"Could not create temp upload directory: {TEMP_UPLOAD_DIR}")
+        else:
+            logger.info(f"Lifespan: 临时上传目录已存在: {TEMP_UPLOAD_DIR}")
+        # --- 新增结束 ---
+
     except Exception as e:
-        logger.error(f"Lifespan: HTTP客户端初始化失败: {e}", exc_info=True)
-        app_instance.state.http_client = None
+        logger.error(f"Lifespan: HTTP客户端初始化过程中发生错误: {e}", exc_info=True)
+        app_instance.state.http_client = None # 确保即使出错也设置
     
     yield # FastAPI 应用在此运行
 
@@ -68,7 +83,7 @@ async def lifespan(app_instance: FastAPI):
     else:
         logger.warning("Lifespan: HTTP客户端未找到或状态未知，可能无需关闭或已处理。")
     
-    app_instance.state.http_client = None # 清理状态
+    app_instance.state.http_client = None
     logger.info("Lifespan: 应用关闭流程完成。")
 
 
@@ -77,7 +92,7 @@ app = FastAPI(
     title="EzTalk Proxy",
     description=f"代理服务，版本: {APP_VERSION}",
     version=APP_VERSION,
-    lifespan=lifespan,
+    lifespan=lifespan, # 使用 lifespan 上下文管理器
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -85,18 +100,17 @@ app = FastAPI(
 # --- CORS 中间件配置 ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 生产环境建议指定具体来源
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"] # 按需配置需要暴露的头部
+    expose_headers=["*"]
 )
 logger.info(f"FastAPI EzTalk Proxy v{APP_VERSION} 初始化完成，已配置CORS。")
 
 # --- 包含主路由 ---
-# routers/chat.py 将处理 /chat 路径的请求，并在内部根据模型名称分发逻辑
-app.include_router(chat_router.router)
-
+# 假设你的 chat_router.router 在 routers/chat.py 中定义
+app.include_router(chat_router.router) # 直接包含路由，前缀可以在路由内部定义或在这里定义
 
 # --- 健康检查端点 ---
 @app.get("/health", status_code=200, include_in_schema=False, tags=["Utilities"])
@@ -112,7 +126,7 @@ async def health_check(request: Request):
     elif hasattr(client_from_state, 'is_closed') and client_from_state.is_closed:
         client_status = "warning"
         detail_message = "HTTP client in app.state is closed."
-    elif not hasattr(client_from_state, 'is_closed'):
+    elif not hasattr(client_from_state, 'is_closed'): # 进一步检查类型是否符合预期
         client_status = "error"
         detail_message = f"Unexpected object in app.state.http_client: {type(client_from_state)}"
 
@@ -125,44 +139,30 @@ if __name__ == "__main__":
     import uvicorn
 
     APP_HOST = os.getenv("HOST", "0.0.0.0")
-    APP_PORT = int(os.getenv("PORT", 7860)) # 与您日志中的端口保持一致
-    # RELOAD_DELAY = float(os.getenv("RELOAD_DELAY", "1.0")) # (可选) uvicorn --reload-delay
-    # WORKERS = int(os.getenv("WORKERS", "1")) # (可选) uvicorn --workers
-
-    # 开发模式自动重载，从环境变量读取，默认为False
-    # 注意：Uvicorn 的 --reload 标志通常在命令行传递，而不是在代码中配置 reload=True
-    # 如果要通过代码控制，可能需要不同的启动方式或针对 uvicorn.Server 的更底层配置
-    # 这里我们假设 --reload 是通过命令行参数传递给 uvicorn 的
+    APP_PORT = int(os.getenv("PORT", 7860))
     DEV_RELOAD = os.getenv("DEV_RELOAD", "false").lower() == "true"
 
-
-    # Uvicorn 日志配置 (与您提供的基本一致)
     log_config = uvicorn.config.LOGGING_CONFIG.copy()
     log_config["formatters"].setdefault("default", {"fmt": "%(levelprefix)s %(asctime)s [%(name)s] - %(message)s", "datefmt": "%Y-%m-%d %H:%M:%S", "use_colors": None})
     log_config["formatters"]["default"]["fmt"] = "%(asctime)s %(levelname)-8s [%(name)s:%(module)s:%(lineno)d] - %(message)s"
-    
     log_config["formatters"].setdefault("access", {"fmt": "", "datefmt": "", "use_colors": None})
-    log_config["formatters"]["access"]["fmt"] = '%(asctime)s %(levelname)-8s [%(name)s] - %(client_addr)s - "%(request_line)s" %(status_code)s' # noqa: E501
+    log_config["formatters"]["access"]["fmt"] = '%(asctime)s %(levelname)-8s [%(name)s] - %(client_addr)s - "%(request_line)s" %(status_code)s'
     log_config["formatters"]["access"]["datefmt"] = "%Y-%m-%d %H:%M:%S"
-    
-    log_config["handlers"].setdefault("default", {"formatter": "default", "class": "logging.StreamHandler", "stream": "ext://sys.stderr"}) # noqa: E501
-    log_config["handlers"].setdefault("access", {"formatter": "access", "class": "logging.StreamHandler", "stream": "ext://sys.stdout"}) # noqa: E501
-    
+    log_config["handlers"].setdefault("default", {"formatter": "default", "class": "logging.StreamHandler", "stream": "ext://sys.stderr"})
+    log_config["handlers"].setdefault("access", {"formatter": "access", "class": "logging.StreamHandler", "stream": "ext://sys.stdout"})
     log_config.setdefault("loggers", {})
     log_config["loggers"]["uvicorn"] = {"handlers": ["default"], "level": LOG_LEVEL_FROM_ENV.upper(), "propagate": False}
-    log_config["loggers"]["uvicorn.error"] = {"handlers": ["default"], "level": "INFO", "propagate": False}
-    log_config["loggers"]["uvicorn.access"] = {"handlers": ["access"], "level": "WARNING", "propagate": False}
-
+    log_config["loggers"]["uvicorn.error"] = {"handlers": ["default"], "level": "INFO", "propagate": False} # Uvicorn 自身的错误
+    log_config["loggers"]["uvicorn.access"] = {"handlers": ["access"], "level": "WARNING", "propagate": False} # Uvicorn 访问日志
 
     logger.info(f"准备启动 Uvicorn 服务器: http://{APP_HOST}:{APP_PORT}")
-    logger.info(f"开发模式自动重载 (通过命令行 --reload 控制): {DEV_RELOAD}") # 提示DEV_RELOAD的来源
+    logger.info(f"开发模式自动重载 (通过命令行 --reload 控制): {DEV_RELOAD}")
     logger.info(f"应用日志级别 (EzTalkProxy.*): {LOG_LEVEL_FROM_ENV}")
     
     uvicorn.run(
-        "eztalk_proxy.main:app", # 指向 FastAPI app 实例的正确路径
+        "eztalk_proxy.main:app",
         host=APP_HOST,
         port=APP_PORT,
         log_config=log_config,
-        reload=DEV_RELOAD # 如果要通过代码控制reload，Uvicorn的这个参数可能不直接生效于其主进程
-                          # 通常 --reload 是 uvicorn 命令行的参数
+        reload=DEV_RELOAD # uvicorn reload 参数
     )

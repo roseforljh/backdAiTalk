@@ -7,7 +7,7 @@ import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
 from fastapi import Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse # Not used directly here, but often in router files
 
 from eztalk_proxy.models import ChatRequestModel, AppStreamEventPy, PartsApiMessagePy
 from eztalk_proxy.multimodal_models import PyTextContentPart, PyInlineDataContentPart
@@ -70,9 +70,11 @@ async def generate_gemini_rest_api_events_with_docs(
                 copied_msg = PartsApiMessagePy(
                     role=msg_abstract.role,
                     parts=copied_msg_parts,
-                    message_type="parts_message" # Explicitly provide message_type
+                    message_type="parts_message" # <--- 显式提供 message_type
                 )
                 if hasattr(msg_abstract, 'name') and msg_abstract.name: copied_msg.name = msg_abstract.name
+                if hasattr(msg_abstract, 'tool_calls') and msg_abstract.tool_calls: copied_msg.tool_calls = msg_abstract.tool_calls
+                if hasattr(msg_abstract, 'tool_call_id') and msg_abstract.tool_call_id: copied_msg.tool_call_id = msg_abstract.tool_call_id
                 active_messages_for_llm.append(copied_msg)
 
     if extracted_document_text:
@@ -92,7 +94,7 @@ async def generate_gemini_rest_api_events_with_docs(
                     PyTextContentPart(type="text_content", text="请基于以下文档内容进行处理或回答："),
                     doc_text_part
                 ],
-                message_type="parts_message" # Explicitly provide message_type
+                message_type="parts_message" # <--- 显式提供 message_type
             )
             active_messages_for_llm.append(new_user_message_with_doc)
         original_user_text_found_in_parts = True
@@ -115,11 +117,11 @@ async def generate_gemini_rest_api_events_with_docs(
             search_context_api_message = PartsApiMessagePy(
                 role="user", 
                 parts=search_context_parts,
-                message_type="parts_message" # Explicitly provide message_type
+                message_type="parts_message" # <--- 显式提供 message_type
             )
             last_user_idx = -1
-            for i, msg_abstract in reversed(list(enumerate(active_messages_for_llm))):
-                if msg_abstract.role == "user": last_user_idx = i; break
+            for i, msg_abstract_loop in reversed(list(enumerate(active_messages_for_llm))): # Renamed msg_abstract to avoid conflict
+                if msg_abstract_loop.role == "user": last_user_idx = i; break
             if last_user_idx != -1: active_messages_for_llm.insert(last_user_idx, search_context_api_message)
             else: active_messages_for_llm.insert(0, search_context_api_message)
             search_results_generated_this_time = True
@@ -155,6 +157,8 @@ async def generate_gemini_rest_api_events_with_docs(
         logger.debug(f"{log_prefix}: (Gemini REST) Payload (contents preview): {[(c.get('role'), [p.get('text', 'NonTextPart')[:50] + '...' if len(p.get('text','')) > 50 else p.get('text','NonTextPart') for p in c.get('parts', [])]) for c in json_payload.get('contents', [])]}")
         
         buffer = bytearray()
+        # --- The rest of the SSE streaming and error handling logic remains the same ---
+        # --- Ensure the finally block correctly cleans up temp_files_to_delete_after_stream ---
         async with http_client.stream("POST", target_url, headers=headers, json=json_payload, timeout=API_TIMEOUT) as response:
             logger.info(f"{log_prefix}: (Gemini REST) Upstream LLM response status: {response.status_code}")
             if not (200 <= response.status_code < 300):
@@ -264,7 +268,7 @@ async def handle_gemini_request_entry(
     http_client: httpx.AsyncClient,
     request_id: str
 ):
-    logger.warning(f"RID-{request_id}: handle_gemini_request_entry was called. This entry point assumes document text is already integrated or not applicable.")
+    logger.warning(f"RID-{request_id}: handle_gemini_request_entry was called. This entry point assumes document text is already integrated or not applicable, and it does not manage temporary files.")
     return StreamingResponse(
         generate_gemini_rest_api_events_with_docs(
              gemini_chat_input=gemini_chat_input,
