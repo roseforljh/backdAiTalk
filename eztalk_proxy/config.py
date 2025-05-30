@@ -1,4 +1,3 @@
-# eztalk_proxy/config.py
 import os
 from dotenv import load_dotenv
 
@@ -22,7 +21,7 @@ GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")       # 用于 Google Custom Search E
 
 # Timeouts and Limits
 API_TIMEOUT = int(os.getenv("API_TIMEOUT", "300")) # 通用 API 请求超时 (秒)
-READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "60.0")) # Ktor/httpx 流读取超时 (秒)，但对于 SSE 流通常会覆盖
+READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "60.0")) # 流读取超时 (秒)
 MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "200")) # httpx 连接池大小
 MAX_SSE_LINE_LENGTH = int(os.getenv("MAX_SSE_LINE_LENGTH", f"{1024 * 1024}")) # SSE 行最大长度
 
@@ -53,5 +52,35 @@ SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION = [
     "application/msword", # doc
     # "text/markdown",
     # "text/csv",
+]
+
+# --- 新增：Gemini 支持的上传文件 MIME 类型 ---
+# 请务必查阅最新的 Google Gemini API 文档以获取准确的支持的 MIME 类型列表，并更新此列表
+GEMINI_SUPPORTED_UPLOAD_MIMETYPES = [
+    # 图片
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+    # 视频 (具体支持情况以Gemini官方文档为准)
+    "video/mp4",
+    "video/mpeg",
+    "video/quicktime", # .mov
+    "video/x-msvideo", # .avi
+    "video/x-flv",
+    "video/x-matroska", # .mkv
+    "video/webm",
+    "video/x-ms-wmv",
+    "video/3gpp",
+    # 音频 (具体支持情况以Gemini官方文档为准)
+    "audio/wav",
+    "audio/mpeg",     # mp3
+    "audio/aac",
+    "audio/ogg",      # ogg vorbis
+    "audio/flac",
+    "audio/opus",
+    "audio/amr",
+    "audio/aiff",
 ]
 # --- 文件处理配置结束 ---
