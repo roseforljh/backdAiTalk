@@ -2,38 +2,37 @@
 import os
 import logging
 import httpx
-import orjson # orjson 用于序列化和反序列化
-import asyncio # 用于异步操作
-import shutil # 用于文件操作
-import uuid # 用于生成唯一文件名
+import orjson
+import asyncio
+import shutil
+import uuid
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
-from fastapi import APIRouter, Depends, Request, HTTPException, File, UploadFile, Form # 新增 File, UploadFile, Form
+from fastapi import APIRouter, Depends, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
 
-# 使用绝对导入
 from eztalk_proxy.models import (
-    ChatRequestModel, # 将用于Form参数，如果ChatRequestModel本身不适合multipart
+    ChatRequestModel,
     SimpleTextApiMessagePy,
     PartsApiMessagePy,
     AppStreamEventPy
 )
-from eztalk_proxy.config import ( # 确保从config导入所有需要的配置
+from eztalk_proxy.config import (
     COMMON_HEADERS,
-    TEMP_UPLOAD_DIR, # 文档处理
-    MAX_DOCUMENT_UPLOAD_SIZE_MB, # 文档处理
-    MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT, # 文档处理
-    API_TIMEOUT # 新增导入，用于 httpx.stream 的 timeout
+    TEMP_UPLOAD_DIR,
+    MAX_DOCUMENT_UPLOAD_SIZE_MB,
+    MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT, # 确保这个也被使用
+    API_TIMEOUT
 )
 from eztalk_proxy.utils import (
     extract_sse_lines,
     get_current_time_iso,
     orjson_dumps_bytes_wrapper,
     strip_potentially_harmful_html_and_normalize_newlines,
-    extract_text_from_uploaded_document # 新增文档文本提取函数
+    extract_text_from_uploaded_document
 )
 from eztalk_proxy.api_helpers import prepare_openai_request
-from eztalk_proxy.routers import multimodal_chat as multimodal_router # 用于Gemini REST分发
+from eztalk_proxy.routers import multimodal_chat as multimodal_router
 from eztalk_proxy.stream_processors import (
     process_openai_like_sse_stream,
     handle_stream_error,
@@ -45,7 +44,6 @@ from eztalk_proxy.web_search import perform_web_search, generate_search_context_
 logger = logging.getLogger("EzTalkProxy.Routers.Chat")
 router = APIRouter()
 
-# --- HTTP 客户端依赖注入 ---
 async def get_http_client(request: Request) -> httpx.AsyncClient:
     client = getattr(request.app.state, "http_client", None)
     if client is None or (hasattr(client, 'is_closed') and client.is_closed):
@@ -53,10 +51,9 @@ async def get_http_client(request: Request) -> httpx.AsyncClient:
         raise HTTPException(status_code=503, detail="Service unavailable: HTTP client not initialized or closed.")
     return client
 
-# --- 主聊天代理端点 ---
 @router.post("/chat", response_class=StreamingResponse, summary="AI聊天完成代理", tags=["AI Proxy"])
 async def chat_proxy_entrypoint(
-    fastapi_request_obj: Request, # <--- 移到前面以解决 SyntaxError
+    fastapi_request_obj: Request,
     chat_request_json: str = Form(...),
     http_client: httpx.AsyncClient = Depends(get_http_client),
     uploaded_documents: List[UploadFile] = File(default_factory=list)
@@ -71,7 +68,7 @@ async def chat_proxy_entrypoint(
     except orjson.JSONDecodeError as e_json:
         logger.error(f"{log_prefix}: Failed to parse chat_request_json: {e_json}. Data: {chat_request_json[:500]}")
         raise HTTPException(status_code=400, detail=f"Invalid chat_request_json format: {e_json}")
-    except Exception as e_pydantic: # Catch Pydantic validation errors
+    except Exception as e_pydantic:
         logger.error(f"{log_prefix}: Failed to validate ChatRequestModel from JSON: {e_pydantic}. Data: {chat_request_json[:500]}")
         raise HTTPException(status_code=400, detail=f"Invalid data for ChatRequestModel: {e_pydantic}")
 
@@ -89,15 +86,14 @@ async def chat_proxy_entrypoint(
         for doc_file in uploaded_documents:
             if not doc_file.filename:
                 logger.warning(f"{log_prefix}: Skipping uploaded file with no filename.")
-                try: await doc_file.close() # Ensure file is closed even if skipped
+                try: await doc_file.close()
                 except Exception: pass
                 continue
 
             file_too_large = False
             if hasattr(doc_file, 'size') and doc_file.size is not None:
                 if doc_file.size > MAX_DOCUMENT_UPLOAD_SIZE_MB * 1024 * 1024:
-                    logger.warning(f"{log_prefix}: Document '{doc_file.filename}' (size: {doc_file.size} B) exceeds max size "
-                                   f"({MAX_DOCUMENT_UPLOAD_SIZE_MB} MB). Skipping.")
+                    logger.warning(f"{log_prefix}: Document '{doc_file.filename}' (size: {doc_file.size} B) exceeds max size ({MAX_DOCUMENT_UPLOAD_SIZE_MB} MB). Skipping.")
                     file_too_large = True
             else:
                 logger.info(f"{log_prefix}: Could not determine size of '{doc_file.filename}' before saving. Proceeding with caution.")
@@ -114,6 +110,18 @@ async def chat_proxy_entrypoint(
             temp_file_path = os.path.join(TEMP_UPLOAD_DIR, temp_filename)
             
             try:
+                # --- इंश्योर डायरेक्टरी मौजूद है ---
+                if not os.path.exists(TEMP_UPLOAD_DIR):
+                    try:
+                        os.makedirs(TEMP_UPLOAD_DIR)
+                        logger.info(f"{log_prefix}: Created temporary upload directory: {TEMP_UPLOAD_DIR}")
+                    except OSError as e_mkdir:
+                        logger.error(f"{log_prefix}: Failed to create temporary upload directory {TEMP_UPLOAD_DIR}: {e_mkdir}", exc_info=True)
+                        try: await doc_file.close()
+                        except Exception: pass
+                        continue 
+                # --- डायरेक्टरी सुनिश्चित करना समाप्त ---
+
                 logger.debug(f"{log_prefix}: Saving uploaded document '{doc_file.filename}' to '{temp_file_path}'. MIME: {doc_file.content_type}")
                 with open(temp_file_path, "wb") as buffer:
                     shutil.copyfileobj(doc_file.file, buffer)
@@ -125,9 +133,10 @@ async def chat_proxy_entrypoint(
                     doc_file.filename
                 )
                 if document_text:
+                    # MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT 已在 extract_text_from_uploaded_document 中处理
                     doc_text_part = f"\n\n--- 来自文档: {doc_file.filename} ---\n{document_text}\n--- 文档结束: {doc_file.filename} ---\n"
                     processed_document_text_parts.append(doc_text_part)
-                    logger.info(f"{log_prefix}: Successfully extracted and processed text from '{doc_file.filename}'. Length: {len(document_text)}")
+                    logger.info(f"{log_prefix}: Successfully processed text from '{doc_file.filename}'. Length: {len(document_text)}")
                 else:
                     logger.warning(f"{log_prefix}: Failed to extract text or no text found in '{doc_file.filename}'.")
             except Exception as e_doc_proc:
@@ -188,7 +197,7 @@ async def chat_proxy_entrypoint(
             elif isinstance(msg_abstract, PartsApiMessagePy):
                 logger.warning(f"{log_prefix}: Non-Gemini-REST path received PartsApiMessage. Extracting text.")
                 text_from_parts = ""
-                for part_model in msg_abstract.parts:
+                for part_model in msg_abstract.parts: # part_model is PyTextContentPart etc.
                     if hasattr(part_model, 'text') and isinstance(part_model.text, str):
                          text_from_parts += part_model.text + " "
                 
