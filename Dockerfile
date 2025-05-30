@@ -2,29 +2,24 @@ FROM python:3.9-slim
 
 ENV PYTHONUNBUFFERED 1
 ENV APP_HOME /app
-ENV TEMP_UPLOAD_DIR_NAME temp_document_uploads
+ENV TEMP_UPLOAD_DIR_NAME temp_document_uploads 
 
 WORKDIR ${APP_HOME}
 
+
+RUN mkdir -p ${APP_HOME}/${TEMP_UPLOAD_DIR_NAME} && \
+    chmod 777 ${APP_HOME}/${TEMP_UPLOAD_DIR_NAME}
 
 
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-
-RUN mkdir -p ${TEMP_UPLOAD_DIR_NAME} && \
-    chmod 755 ${TEMP_UPLOAD_DIR_NAME}
-
-
-
 COPY ./eztalk_proxy ${APP_HOME}/eztalk_proxy
-
 
 
 ENV PORT 7860
 EXPOSE ${PORT}
-
 
 
 

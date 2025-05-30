@@ -7,7 +7,7 @@ import asyncio
 from typing import Optional, Dict, Any, AsyncGenerator, List
 
 from fastapi import Request
-from fastapi.responses import StreamingResponse # Not used directly here, but often in router files
+from fastapi.responses import StreamingResponse
 
 from eztalk_proxy.models import ChatRequestModel, AppStreamEventPy, PartsApiMessagePy
 from eztalk_proxy.multimodal_models import PyTextContentPart, PyInlineDataContentPart
@@ -70,7 +70,7 @@ async def generate_gemini_rest_api_events_with_docs(
                 copied_msg = PartsApiMessagePy(
                     role=msg_abstract.role,
                     parts=copied_msg_parts,
-                    message_type="parts_message" # <--- 显式提供 message_type
+                    message_type="parts_message" # <--- 显式提供 message_type (原始字段名)
                 )
                 if hasattr(msg_abstract, 'name') and msg_abstract.name: copied_msg.name = msg_abstract.name
                 if hasattr(msg_abstract, 'tool_calls') and msg_abstract.tool_calls: copied_msg.tool_calls = msg_abstract.tool_calls
@@ -120,7 +120,7 @@ async def generate_gemini_rest_api_events_with_docs(
                 message_type="parts_message" # <--- 显式提供 message_type
             )
             last_user_idx = -1
-            for i, msg_abstract_loop in reversed(list(enumerate(active_messages_for_llm))): # Renamed msg_abstract to avoid conflict
+            for i, msg_abstract_loop in reversed(list(enumerate(active_messages_for_llm))):
                 if msg_abstract_loop.role == "user": last_user_idx = i; break
             if last_user_idx != -1: active_messages_for_llm.insert(last_user_idx, search_context_api_message)
             else: active_messages_for_llm.insert(0, search_context_api_message)
@@ -157,8 +157,6 @@ async def generate_gemini_rest_api_events_with_docs(
         logger.debug(f"{log_prefix}: (Gemini REST) Payload (contents preview): {[(c.get('role'), [p.get('text', 'NonTextPart')[:50] + '...' if len(p.get('text','')) > 50 else p.get('text','NonTextPart') for p in c.get('parts', [])]) for c in json_payload.get('contents', [])]}")
         
         buffer = bytearray()
-        # --- The rest of the SSE streaming and error handling logic remains the same ---
-        # --- Ensure the finally block correctly cleans up temp_files_to_delete_after_stream ---
         async with http_client.stream("POST", target_url, headers=headers, json=json_payload, timeout=API_TIMEOUT) as response:
             logger.info(f"{log_prefix}: (Gemini REST) Upstream LLM response status: {response.status_code}")
             if not (200 <= response.status_code < 300):
