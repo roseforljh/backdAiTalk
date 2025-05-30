@@ -1,8 +1,8 @@
-# eztalk_proxy/models.py
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Literal, Optional, Union, Annotated
 
-from .multimodal_models import IncomingApiContentPart, GenerationConfigPy # GenerationConfigPy 从 multimodal_models 导入
+# 确保从正确的路径导入
+from .multimodal_models import IncomingApiContentPart, GenerationConfigPy
 
 class OpenAIToolCallFunction(BaseModel):
     name: Optional[str] = None
@@ -20,18 +20,17 @@ class BaseApiMessagePy(BaseModel):
     message_type: str = Field(alias="type") # Pydantic 使用此字段进行辨别
 
 class SimpleTextApiMessagePy(BaseApiMessagePy):
-    message_type: Literal["simple_text_message"] = Field(alias="type")
+    message_type: Literal["simple_text_message"] = Field("simple_text_message", alias="type") # 确保有默认值
     content: str
     tool_call_id: Optional[str] = None
     tool_calls: Optional[List[OpenAIToolCall]] = None
 
 class PartsApiMessagePy(BaseApiMessagePy):
-    message_type: Literal["parts_message"] = Field(alias="type")
+    message_type: Literal["parts_message"] = Field("parts_message", alias="type") # 确保有默认值
     parts: List[IncomingApiContentPart]
     tool_call_id: Optional[str] = None
     tool_calls: Optional[List[OpenAIToolCall]] = None
 
-# AbstractApiMessagePy 已经正确定义了辨别器
 AbstractApiMessagePy = Annotated[
     Union[SimpleTextApiMessagePy, PartsApiMessagePy],
     Field(discriminator="message_type") 
@@ -39,10 +38,7 @@ AbstractApiMessagePy = Annotated[
 
 class ChatRequestModel(BaseModel):
     api_address: Optional[str] = Field(None, alias="apiAddress")
-    # --- 修改点：移除 messages 字段上的 Field 和 discriminator ---
-    # Pydantic 会自动对 List中的 AbstractApiMessagePy 应用其已定义的辨别器
-    messages: List[AbstractApiMessagePy] # <--- 直接使用类型，不再需要 Field(..., discriminator=...)
-    # --- 修改结束 ---
+    messages: List[AbstractApiMessagePy] # <--- 确认这里没有多余的 Field(discriminator=...)
     provider: str
     model: str
     api_key: str = Field(alias="apiKey")
@@ -61,8 +57,8 @@ class ChatRequestModel(BaseModel):
     custom_extra_body: Optional[Dict[str, Any]] = Field(None, alias="customExtraBody")
 
     class Config:
-        populate_by_name = True
-
+        populate_by_name = True # Pydantic V1 style
+        # model_config = {"populate_by_name": True} # Pydantic V2 style
 
 class AppStreamEventPy(BaseModel):
     type: str
@@ -80,4 +76,5 @@ class AppStreamEventPy(BaseModel):
     timestamp: Optional[str] = None
 
     class Config:
-        populate_by_name = True
+        populate_by_name = True # Pydantic V1 style
+        # model_config = {"populate_by_name": True} # Pydantic V2 style
