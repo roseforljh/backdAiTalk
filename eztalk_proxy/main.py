@@ -117,7 +117,7 @@ logger.info(f"FastAPI EzTalk Proxy v{APP_VERSION} 初始化完成，已配置COR
 
 # --- 包含主路由 ---
 # 假设你的 chat_router.router 在 eztalk_proxy/routers/chat.py 中定义
-app.include_router(chat_router.router, prefix="/api/v1") # 示例：添加API版本前缀
+app.include_router(chat_router.router) # 示例：添加API版本前缀
 logger.info("聊天路由已加载到路径 /api/v1/chat (或其他在chat_router中定义的路径)")
 
 
