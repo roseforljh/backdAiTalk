@@ -1,23 +1,20 @@
-# eztalk_proxy/multimodal_api_helpers.py
 import logging
 from typing import List, Dict, Any, Optional, Union, Tuple
 
-# Pydantic 模型
-from eztalk_proxy.models import ( # 使用绝对导入
+from eztalk_proxy.models import (
     ChatRequestModel,
     PartsApiMessagePy,
-    # AppStreamEventPy # Not used for request preparation
+    SimpleTextApiMessagePy
 )
-from eztalk_proxy.multimodal_models import ( # 使用绝对导入
+from eztalk_proxy.multimodal_models import (
     PyTextContentPart,
     PyFileUriContentPart,
     PyInlineDataContentPart
 )
-from eztalk_proxy.config import GOOGLE_API_BASE_URL # 使用绝对导入
-from eztalk_proxy.utils import is_gemini_2_5_model # 使用绝对导入
+from eztalk_proxy.config import GOOGLE_API_BASE_URL
+from eztalk_proxy.utils import is_gemini_2_5_model
 
 logger = logging.getLogger("EzTalkProxy.MultimodalAPIHelpers")
-
 
 def convert_parts_messages_to_rest_api_contents(
     messages: List[PartsApiMessagePy],
@@ -32,7 +29,7 @@ def convert_parts_messages_to_rest_api_contents(
             continue
 
         rest_parts: List[Dict[str, Any]] = []
-
+        
         for actual_part in msg.parts:
             try:
                 if isinstance(actual_part, PyTextContentPart):
@@ -55,7 +52,7 @@ def convert_parts_messages_to_rest_api_contents(
                     else:
                         logger.warning(f"{log_prefix}: HTTP/S URI '{actual_part.uri}' for FileUriPart. REST API support varies. Skipping for now.")
                 else:
-                    logger.warning(f"{log_prefix}: Unknown actual part type: {type(actual_part)}. Skipping part.")
+                    logger.warning(f"{log_prefix}: Unknown actual part type during conversion: {type(actual_part)}. Content: {str(actual_part)[:100]}. Skipping part.")
             except Exception as e_part:
                 logger.error(f"{log_prefix}: Error processing message part for REST API: {actual_part}, Error: {e_part}", exc_info=True)
         
@@ -63,88 +60,125 @@ def convert_parts_messages_to_rest_api_contents(
             role_for_api = msg.role
             if msg.role == "assistant":
                 role_for_api = "model"
-            elif msg.role == "tool": # For REST API, tool responses are often role "function" or "tool" (for function_response part)
-                role_for_api = "function" # Assuming "function" role for tool call results
-                if not msg.name and not any("functionResponse" in part for part in rest_parts if isinstance(part, dict)):
-                    logger.warning(f"{log_prefix}: Message with role 'tool' (mapped to 'function') might be missing 'name' or 'functionResponse' structure.")
-
-
-            if role_for_api not in ["user", "model", "function"]: # Common REST API roles for contents
-                 logger.warning(f"{log_prefix}: Invalid role '{msg.role}' for Gemini REST API, mapping to 'user'.")
+            elif msg.role == "tool":
+                role_for_api = "function"
+            
+            if role_for_api not in ["user", "model", "function"]:
+                 logger.warning(f"{log_prefix}: Mapping role '{msg.role}' to 'user' for Gemini REST API contents (current role_for_api: {role_for_api}).")
                  role_for_api = "user"
-            rest_api_contents.append({"role": role_for_api, "parts": rest_parts})
+            
+            content_to_add = {"role": role_for_api, "parts": rest_parts}
+            rest_api_contents.append(content_to_add)
         else:
             logger.warning(f"{log_prefix}: Message from role {msg.role} at index {i} resulted in no valid parts for REST API. Skipping.")
+    
     return rest_api_contents
 
-def prepare_gemini_rest_api_request( # Renamed function
+def prepare_gemini_rest_api_request(
     chat_input: ChatRequestModel,
     request_id: str
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     log_prefix = f"RID-{request_id}"
+    logger.info(f"{log_prefix}: Preparing Gemini REST API request for model {chat_input.model}.")
 
     model_name = chat_input.model
     base_api_url = GOOGLE_API_BASE_URL.rstrip('/')
-    # Use v1beta for streamGenerateContent, as it often has newer features like thinking
-    target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={chat_input.api_key}"
-    target_url += "&alt=sse" # Request Server-Sent Events
+    target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={chat_input.api_key}&alt=sse"
 
     headers = {"Content-Type": "application/json"}
-
     json_payload: Dict[str, Any] = {}
-
-    # Convert messages to REST API 'contents' structure
-    parts_api_messages = [msg for msg in chat_input.messages if isinstance(msg, PartsApiMessagePy)]
-    json_payload["contents"] = convert_parts_messages_to_rest_api_contents(parts_api_messages, request_id)
-
-    # --- Generation Config & Thinking Config for REST API ---
-    generation_config_rest: Dict[str, Any] = {}
     
-    # Populate from chat_input.generation_config (GenerationConfigPy) if present
+    messages_to_convert_or_use: List[PartsApiMessagePy] = []
+    for msg_abstract in chat_input.messages:
+        if isinstance(msg_abstract, PartsApiMessagePy):
+            messages_to_convert_or_use.append(msg_abstract)
+        elif isinstance(msg_abstract, SimpleTextApiMessagePy):
+            logger.debug(f"{log_prefix}: Converting SimpleTextApiMessagePy (role: {msg_abstract.role}) to PartsApiMessagePy for Gemini REST preparation.")
+            text_part = PyTextContentPart(type="text_content", text=msg_abstract.content or "")
+            parts_message_equivalent = PartsApiMessagePy(
+                role=msg_abstract.role,
+                message_type="parts_message",
+                parts=[text_part],
+                name=msg_abstract.name,
+                tool_calls=msg_abstract.tool_calls,
+                tool_call_id=msg_abstract.tool_call_id
+            )
+            messages_to_convert_or_use.append(parts_message_equivalent)
+        else:
+            logger.warning(f"{log_prefix}: Encountered unknown message type {type(msg_abstract)} in chat_input.messages during Gemini REST prep. Skipping.")
+
+    if not messages_to_convert_or_use:
+        logger.error(f"{log_prefix}: No processable messages found for Gemini REST request.")
+        json_payload["contents"] = []
+    else:
+        json_payload["contents"] = convert_parts_messages_to_rest_api_contents(messages_to_convert_or_use, request_id)
+
+    generation_config_rest: Dict[str, Any] = {}
     if chat_input.generation_config:
         gc_in = chat_input.generation_config
         if gc_in.temperature is not None: generation_config_rest["temperature"] = gc_in.temperature
-        if gc_in.top_p is not None: generation_config_rest["topP"] = gc_in.top_p # camelCase for REST
+        if gc_in.top_p is not None: generation_config_rest["topP"] = gc_in.top_p
         if gc_in.max_output_tokens is not None: generation_config_rest["maxOutputTokens"] = gc_in.max_output_tokens
-        # candidateCount, stopSequences can be added here
-
         if gc_in.thinking_config:
             tc_in = gc_in.thinking_config
-           
             thinking_config_for_gen_config: Dict[str, Any] = {}
-            if tc_in.include_thoughts is not None:
+            if tc_in.include_thoughts is not None: 
                 thinking_config_for_gen_config["includeThoughts"] = tc_in.include_thoughts
-                logger.info(f"{log_prefix}: REST API: Setting includeThoughts={tc_in.include_thoughts} in thinkingConfig.")
-            if tc_in.thinking_budget is not None:
-                if "flash" in model_name.lower() or is_gemini_2_5_model(model_name): # Gemini 2.5 Flash supports budget
-                    thinking_config_for_gen_config["thinkingBudget"] = tc_in.thinking_budget
-                    logger.info(f"{log_prefix}: REST API: Setting thinkingBudget={tc_in.thinking_budget} in thinkingConfig.")
-            
-            if thinking_config_for_gen_config: # If any thinking params were set
+            if tc_in.thinking_budget is not None and ("flash" in model_name.lower() or is_gemini_2_5_model(model_name)): 
+                thinking_config_for_gen_config["thinkingBudget"] = tc_in.thinking_budget
+            if thinking_config_for_gen_config: 
                 generation_config_rest["thinkingConfig"] = thinking_config_for_gen_config
-
+    
     if "temperature" not in generation_config_rest and chat_input.temperature is not None:
         generation_config_rest["temperature"] = chat_input.temperature
     if "topP" not in generation_config_rest and chat_input.top_p is not None:
         generation_config_rest["topP"] = chat_input.top_p
     if "maxOutputTokens" not in generation_config_rest and chat_input.max_tokens is not None:
         generation_config_rest["maxOutputTokens"] = chat_input.max_tokens
-
-    # Add generation_config_rest to payload if it has any content
-    if generation_config_rest:
+    
+    if generation_config_rest: 
         json_payload["generationConfig"] = generation_config_rest
 
-
     if chat_input.tools:
+        gemini_tools_payload = []
+        converted_declarations = []
+        for tool_entry in chat_input.tools:
+            if tool_entry.get("type") == "function" and "function" in tool_entry:
+                func_data = tool_entry["function"]
+                declaration = {
+                    "name": func_data.get("name"),
+                    "description": func_data.get("description"),
+                    "parameters": func_data.get("parameters")
+                }
+                declaration = {k: v for k, v in declaration.items() if v is not None}
+                if "name" in declaration and "description" in declaration :
+                    converted_declarations.append(declaration)
         
-        logger.warning(f"{log_prefix}: REST API: Tool configuration needs to be implemented based on Gemini REST API specs.")
-       
+        if converted_declarations:
+            gemini_tools_payload.append({"functionDeclarations": converted_declarations})
+            json_payload["tools"] = gemini_tools_payload
 
-    logger.info(
-        f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0]}... "
-        f"Payload keys: {list(json_payload.keys())}"
-    )
-    if "generationConfig" in json_payload:
-        logger.info(f"{log_prefix}: generationConfig in REST payload: {json_payload['generationConfig']}")
+            if chat_input.tool_choice:
+                tool_config_payload: Dict[str, Any] = {}
+                if isinstance(chat_input.tool_choice, str):
+                    choice_str = chat_input.tool_choice.upper()
+                    if choice_str in ["AUTO", "ANY", "NONE"]:
+                        tool_config_payload = {"mode": choice_str}
+                    elif choice_str == "REQUIRED":
+                        tool_config_payload = {"mode": "ANY"}
+                elif isinstance(chat_input.tool_choice, dict) and chat_input.tool_choice.get("type") == "function":
+                    func_choice = chat_input.tool_choice.get("function", {})
+                    func_name = func_choice.get("name")
+                    if func_name:
+                        tool_config_payload = {"mode": "ANY", "allowedFunctionNames": [func_name]}
+                
+                if tool_config_payload:
+                    if "generationConfig" not in json_payload:
+                        json_payload["generationConfig"] = {}
+                    json_payload["generationConfig"]["toolConfig"] = {"functionCallingConfig": tool_config_payload}
+
+    logger.info(f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0]}... Payload keys: {list(json_payload.keys())}")
+    if "generationConfig" in json_payload: logger.info(f"{log_prefix}: generationConfig in REST payload: {json_payload['generationConfig']}")
+    if "contents" in json_payload: logger.debug(f"{log_prefix}: Final Gemini 'contents' preview for API: {str(json_payload['contents'])[:500]}")
 
     return target_url, headers, json_payload
