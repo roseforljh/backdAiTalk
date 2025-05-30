@@ -111,7 +111,7 @@ async def chat_proxy_entrypoint(
                     actual_size = doc_file.file.tell()
                     doc_file.file.seek(current_pos)
                 
-                if actual_size != -1 and actual_size > MAX_DOCUMENT_UPLOAD_SIZE_MB * 1024 * 1024*100:
+                if actual_size != -1 and actual_size > MAX_DOCUMENT_UPLOAD_SIZE_MB * 1024 * 1024:
                     logger.warning(f"{log_prefix}: Document '{doc_file.filename}' (size: {actual_size} B) exceeds max size ({MAX_DOCUMENT_UPLOAD_SIZE_MB} MB). Skipping.")
                     try: await doc_file.close()
                     except Exception: pass
