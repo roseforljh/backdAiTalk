@@ -1,0 +1,38 @@
+# /app is the directory where your app code and dependencies are installed.
+# Your repository is mounted at /code.
+#
+# The port your app is listening on.
+# The value is supplied by the platform via the an environment variable.
+#
+# The root of the Nginx server.
+# By default, it is configured to be the /code directory,
+# which is the root of your repository.
+#
+# You can add your own rules here.
+#
+# For example, to serve static files from a directory called "static"
+# located at the root of your repository:
+# location /static {
+#     alias /code/static;
+# }
+
+server {
+    # 这一行是关键！
+    # 将默认的1m（1MB）限制提高到一个更大的值，例如50m（50MB）。
+    client_max_body_size 50m;
+
+    listen 0.0.0.0:${NGINX_LISTEN_PORT};
+    server_name "";
+
+    location / {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_buffering off;
+    }
+}

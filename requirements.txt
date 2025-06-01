@@ -31,9 +31,4 @@ python-multipart>=0.0.9 # <--- 确保这个存在并且版本较新
 # Document Processing Libraries
 PyPDF2>=3.0.0             # 用于 PDF 文件文本提取 (或者 pdfminer.six)
 python-docx>=1.1.0        # 用于 DOCX 文件文本提取
-# openpyxl>=3.1.0           # 如果要处理 XLSX 文件 (与 pandas 配合)
-# xlrd>=2.0.1               # 如果要处理旧版 XLS 文件 (与 pandas 配合)
-# pandas>=2.0.0             # 如果要从表格文件中提取数据并转换为文本
 
-# (可选) 更可靠的MIME类型检测
-# python-magic>=0.4.27      # 需要系统级 libmagic 库
