@@ -1,127 +1,86 @@
 # file: /app/eztalk_proxy/katex_prompt.py
 
-KATEX_FORMATTING_INSTRUCTION = """\
-Your goal is to output Markdown that renders mathematical content correctly using KaTeX.
-You MUST strictly follow these rules for ALL mathematical notations.
+KATEX_FORMATTING_INSTRUCTION = (
+    "!! CRITICAL: KaTeX & Markdown Formatting for Reliable Rendering !!\n\n"
+    "Your goal is to ensure that all content—especially mathematical elements and Markdown structures—renders correctly.\n"
+    "Strictly follow these guidelines, but when in doubt, prioritize capturing valid TeX/KaTeX over rejecting unconventional syntax.\n\n"
 
---- A. GENERAL PRINCIPLES ---
-1.  **MATH BLOCKS (Display Math)**: For multi-line equations, complex formulas (e.g., using `\\begin{aligned} ... \\end{aligned}`), or any formula you want displayed on its own line, YOU MUST enclose the entire block within a fenced code block with the `math` language tag:
-    \`\`\`math
-    \\begin{aligned}
-      a &= b + c \\\\
-      x &= y - z
-    \\end{aligned}
-    \`\`\`
-    Another example:
-    \`\`\`math
-    f(x) = \\int_{-\\infty}^\\infty \\hat{f}(\\xi)\\,e^{2 \\pi i \\xi x} \\,d\\xi
-    \`\`\`
+    "--- I. MARKDOWN FORMAT RULES ---\n\n"
+    "1. HEADINGS (ATX Style)\n"
+    "   - Use `# Heading`, `## Heading`, … up to 6 levels.\n"
+    "   - `#` characters SHOULD start at the beginning of the line (0–3 leading spaces allowed).\n"
+    "   - A space MUST follow the `#` before heading text.\n\n"
+    "2. LISTS\n"
+    "   - Unordered: `- item` or `* item`.\n"
+    "   - Ordered: `1. item`, `2. item`, etc.\n"
+    "   - Each list item MUST start on its own line with the marker at column 1 (or after up to 3 spaces).\n\n"
+    "3. COMMONMARK ELEMENTS\n"
+    "   - **Bold**: `**bold**` or `__bold__`.\n"
+    "   - *Italic*: `*italic*` or `_italic_`.\n"
+    "   - Links: `[text](url)`.\n"
+    "   - Images: `![alt](url)`.\n\n"
 
-2.  **INLINE MATH**: For ALL inline mathematical expressions, variables, symbols, and short formulas that appear within a line of text, YOU MUST use `\\(...\\)` delimiters.
-    Examples:
-    - Variables: `The angle is \\(\\theta\\).`
-    - Simple formula: `The projection is \\(l \\cos \\theta\\).`
-    - Condition: `This is true if \\(x > 0\\).`
-    - Numbers with units in formulas: `The length is \\(7\\text{m}\\).` The angle is \\(73.4^\\circ\\).`
-    - Single symbols: `The value of \\(\\pi\\) is approximately \\(3.14\\).`
-    - Fractions: `The ratio is \\(\\frac{a}{b}\\).`
-    - Comparisons: `If \\(x \\leq y\\), then...`
+    "--- II. INLINE MATH (KaTeX) ---\n\n"
+    "A. GUIDING PRINCIPLE: Apply KaTeX only to genuine math content; when in doubt, attempt to wrap in math delimiters.\n\n"
+    "1. PREFERRED INLINE DELIMITERS\n"
+    "   - `\\(...\\)` is recommended. Example: `\\(E = mc^2\\)`.\n"
+    "   - You may also use `$...$` for inline math, as long as each `$` is balanced: `$x + y = z$`.\n"
+    "   - Alternatively, `\\[…\\]` is allowed but better reserved for display math. Example: `\\[x + y = z\\]`.\n\n"
+    "2. WHAT TO PUT INSIDE INLINE MATH\n"
+    "   - Variables: `\\(x,\\; y,\\; z\\)` or `$x, y, z$`.\n"
+    "   - LaTeX commands: `\\(\n"   
+    "       \\alpha, \\beta_1, \\sin(\\theta), \\arg\\max_{i}, \\text{中文与 English}\n"
+    "     \\)` or `$\\alpha, \\beta_1, \\sin(\\theta), \\arg\\max_{i}, \\text{中文与 English}$`.\n\n"
+    "3. WHEN NOT TO USE INLINE MATH\n"
+    "   a. Simple numbers in plain text (“3 apples”, “2025”).\n"
+    "   b. Descriptive statements with no formula. Write them as plain text.\n"
+    "   c. Simple percentages outside statistical context: write `55%` rather than `\\(55\\%\\)`.\n\n"
+    "4. DELIMITERS CHECKLIST\n"
+    "   - Every `$`, `\\(`, or `\\[` that opens math MUST have a matching closing `$`, `\\)`, or `\\]`.\n"
+    "   - Do not wrap entire sentences in math delimiters—only wrap the math fragments.\n"
+    "   - If you see `(x+y)` intended as math, rewrite as `\\(x+y\\)` or `$x+y$`.\n\n"
 
-3.  **TEXT IN MATH**: Use `\\text{...}` for any non-mathematical text (like descriptive words or units in natural language) *inside* a KaTeX math environment (`\\(...\\)` or ` ```math ... ``` `).
-    Example: `\\(P_\\text{final} = P_\\text{initial} + \\Delta P_\\text{change}\\)`
-    Example with units: `The speed is \\(v = 25 \\text{ m/s}\\).`
-    Example with Chinese text: `\\(\\text{水平投影} (l \\cos\\theta)\\)`
+    "--- III. DISPLAY MATH (KaTeX) ---\n\n"
+    "1. PREFERRED: fenced code block with `math` tag:\n\n"
+    "```math\n"
+    "E = \\sum_{n=0}^\\infty \\tfrac{1}{n!}\n"
+    "```\n\n"
+    "2. MULTI-LINE ALIGNED FORMULAS\n\n"
+    "```math\n"
+    "\\begin{aligned}\n"
+    "  \\text{目标公司} &= \\arg\\max_{i \\in \\text{龙头企业}} \\bigl(\\text{岗位契合度\\_index}_{i}\\bigr) \\\\\n"
+    "  \\text{岗位发布预测} &= \\beta_0 + \\beta_1 \\cdot \\cos\\Bigl(\\tfrac{2\\pi}{12}(t - 10)\\Bigr)\n"
+    "\\end{aligned}\n"
+    "```\n\n"
+    "3. ALTERNATIVE: you may also use `$$ ... $$` or `\\[ ... \\]` for display math. As long as they are properly balanced, KaTeX renderer will attempt to parse them.\n\n"
 
-4.  **AVOID PLAIN PARENTHESES FOR MATH**: Do NOT use plain parentheses `(...)` or full-width parentheses `（...）` to denote mathematical expressions if KaTeX delimiters are more appropriate. Always use `\\(...\\)`.
-    - BAD: `The value is (x^2 + y^2).`
-    - GOOD: `The value is \\(x^2 + y^2\\).`
-    - BAD: `Condition: (7 \cos\theta \leq 2)`
-    - GOOD: `Condition: \\(7 \\cos\\theta \leq 2\\)`
+    "--- IV. INLINE MATH SYNTAX CHECKLIST ---\n\n"
+    "□ All inline math fragments are inside one of: `\\(...\\)`, `$...$`, or `\\[...\\]`.\n"
+    "□ No unmatched `$`, `\\(`, `\\)`, `\\[`, or `\\]`.\n"
+    "□ Only math parts are wrapped; avoid wrapping full sentences.\n"
+    "□ Variables, commands, and Chinese via `\\text{…}` are allowed inside math.\n\n"
 
-5.  **BARE LATEX IS FORBIDDEN**: Any LaTeX command (e.g., `\\cos`, `\\theta`, `\\frac`, `\\approx`, `\\leq`, `\\geq`, `\\times`, `\\text{m}`, `^\\circ`, `\\alpha`) MUST be within `\\(...\\)` or a ` ```math ... ``` ` block. Do NOT output LaTeX commands directly in the text without these delimiters.
-    - BAD: `The angle is θ.`
-    - GOOD: `The angle is \\(\\theta\\).`
-    - BAD: `cos θ ≤ 2/7`
-    - GOOD: `\\(\\cos \\theta \\leq \\frac{2}{7}\\)`
-    - BAD: `Result is ≈ 0.2857`
-    - GOOD: `Result is \\(\\approx 0.2857\\)`
-    - BAD: `The length is l = 7 \text{m}.`
-    - GOOD: `The length is \\(l = 7 \\text{m}\\).`
+    "--- V. EXAMPLES (FEW-SHOT) ---\n\n"
+    "1. Vector Projection:\n"
+    "   ```math\n"
+    "   \\text{proj}_{\\vec{B}}(\\vec{A}) = \\frac{\\vec{A} \\cdot \\vec{B}}{\\|\\vec{B}\\|^2} \\; \\vec{B}\n"
+    "   ```\n\n"
+    "2. Inline Calculation:\n"
+    "   Plain answer: “15 divided by 3 is 5.”\n"
+    "   Supplementary math: `\\(15 \\div 3 = 5\\)` or `$\\frac{15}{3} = 5$`.\n\n"
+    "3. Mixed Chinese & English:\n"
+    "   “目标公司: $\\arg\\max_{i \\in \\text{龙头企业}} \\bigl(\\text{匹配度}_{i}\\bigr)$”\n\n"
+    "4. Seasonal Trend:\n"
+    "   ```math\n"
+    "   \\beta_0 + \\beta_1 \\cos\\Bigl(\\tfrac{2\\pi}{12}(t - 10)\\Bigr)\n"
+    "   ```\n\n"
 
-6.  **HANDLING CONTINUOUS/LONG FORMULAS**: When dealing with consecutive mathematical expressions or long/complex formulas:
-    a. Wrap each distinct mathematical expression in its own `\\(...\\)` delimiters
-    b. Break extremely long formulas into separate KaTeX blocks
-    c. For sequences of expressions, clearly separate each with proper delimiters
-    d. If a formula becomes too complex for inline rendering (e.g., containing multiple fractions, integrals, or matrices), convert it to a display math block
-    e. Ensure all opening and closing delimiters are properly balanced
+    "--- VI. FINAL REVIEW CHECKLIST ---\n\n"
+    "□ Math delimiters are used flexibly: one of `\\(...\\)`, `$...$`, `\\[...\\]`, or ```math```.\n"
+    "□ All `$`, `\\(`, `\\[`, etc. are properly balanced.\n"
+    "□ Chinese inside math uses `\\text{…}` and is NOT stripped.\n"
+    "□ Avoid plain `(x+y)`—use a math delimiter for any math.\n"
+    "□ Headings start with `#`; lists start with `- ` or `* `.\n\n"
 
---- B. COMMON MISTAKES TO AVOID (EXAMPLES) ---
-Pay close attention to these specific examples of incorrect and correct formatting:
-
-1.  Incorrect: `要将一根长度 (l = 7 \text{m}) 的甘蔗通过宽度 (w = 2 \text{m}) 的门`
-    Correct: `要将一根长度 \\(l = 7 \\text{m}\\) 的甘蔗通过宽度 \\(w = 2 \\text{m}\\) 的门`
-
-2.  Incorrect: `当甘蔗与地面形成夹角 \theta ((0^\circ < \theta \leq 90^\circ))`
-    Correct: `当甘蔗与地面形成夹角 \\(\\theta\\) (\\(0^\\circ < \\theta \\leq 90^\\circ\\))`
-
-3.  Incorrect: `水平投影长度为 (l \cos\theta)`
-    Correct: `水平投影长度为 \\(l \\cos\\theta\\)`
-
-4.  Incorrect: `通过条件: [l \cos\theta \leq w] 代入数值: [7 \cos\theta \leq 2 implies \cos\theta \leq \frac{2}{7} \approx 0.2857]`
-    Correct: `通过条件: \\(l \\cos\\theta \\leq w\\) 代入数值: \\(7 \\cos\\theta \leq 2 \\implies \\cos\\theta \\leq \\frac{2}{7} \\approx 0.2857\\)`
-
-5.  Incorrect: `解不等式: [\theta \geq \cos^{-1}(0.2857) \approx 73.4^\circ]`
-    Correct: `解不等式: \\(\\theta \\geq \\cos^{-1}(0.2857) \\approx 73.4^\\circ\\)`
-
-6.  Incorrect: `结论: 倾斜角 \theta \geq 73.4^\circ 时, 水平投影 ( \leq 2\text{m} ), 甘蔗可顺利通过.`
-    Correct: `结论: 倾斜角 \\(\\theta \\geq 73.4^\\circ\\) 时, 水平投影 \\( \\leq 2\\text{m} \\), 甘蔗可顺利通过.`
-
-7.  Incorrect: `例如: \theta = 75^\circ 时, 投影长度 ( =7 \cos(75^\circ) \approx 1.81\text{m} < 2\text{m} )`
-    Correct: `例如: \\(\\theta = 75^\\circ\\) 时, 投影长度 \\( =7 \\cos(75^\\circ) \\approx 1.81\\text{m} < 2\\text{m} \\)`
-
-8.  Incorrect: `若中途 \downarrow ((\theta < 73.4^\circ)) , 投影会超过 (2\text{m}).`
-    Correct: `若中途 \\(\\downarrow\\) ((\\(\\theta < 73.4^\\circ\\))) , 投影会超过 \\(2\\text{m}\\).`
-
-9.  **Specific for `\frac`**:
-    Incorrect: `The fraction is \frac{a}{b}.`
-    Correct: `The fraction is \\(\\frac{a}{b}\\).`
-    Incorrect: `... implies \cos\theta \leq \frac{2}{7} ...`
-    Correct: `... \\(\\implies \\cos\\theta \\leq \\frac{2}{7}\\) ...` (assuming the whole expression should be math)
-
-10. **Specific for comparisons followed by variables/numbers**:
-    Incorrect: `... if x \leq y then ...`
-    Correct: `... if \\(x \\leq y\\) then ...`
-    Incorrect: `The condition is \alpha \geq 0.`
-    Correct: `The condition is \\(\\alpha \\geq 0\\).`
-    Incorrect: `... when \text{value} \approx 5.5 ...`
-    Correct: `... when \\(\\text{value} \\approx 5.5\\) ...`
-
-11. **Continuous expressions**:
-    Incorrect: `当 \theta \geq \cos^{-1}(0.2857) \approx 73.4^\circ 时成立`
-    Correct: `当 \\(\\theta \\geq \\cos^{-1}(0.2857)\\) \\(\\approx 73.4^\\circ\\) 时成立`
-    Incorrect: `公式: a=b+c x=y-z`
-    Correct: `公式: \\(a = b + c\\), \\(x = y - z\\)`
-
-12. **Long formulas**:
-    Incorrect: `结果: f(x) = \int_{-\infty}^{\infty} \frac{\sin(kx)}{x} dx + \sum_{n=1}^{\infty} \frac{(-1)^n}{n^2} \approx 1.64493`
-    Correct: 
-    ```
-    结果:
-    \`\`\`math
-    f(x) = \int_{-\infty}^{\infty} \frac{\sin(kx)}{x}  dx + \sum_{n=1}^{\infty} \frac{(-1)^n}{n^2} \approx 1.64493
-    \`\`\`
-    ```
-    Or if keeping inline:
-    `结果: \\(f(x) = \int_{-\infty}^{\infty} \frac{\sin(kx)}{x}  dx + \sum_{n=1}^{\infty} \frac{(-1)^n}{n^2} \approx 1.64493\\)`
-
---- C. FINAL CHECK ---
-Before outputting, mentally review your response:
-1. Does EVERY piece of mathematical notation adhere to rule A2 (inline math with \\(...\\)) or A1 (block math with ```math)? 
-2. For consecutive mathematical expressions, is each wrapped in its own delimiters?
-3. Are long/complex formulas properly broken into display math blocks?
-4. Are all delimiters balanced (every \$ has a matching \$)?
-5. Is there any LaTeX command outside math environments?
-6. Are units and descriptive text inside math environments wrapped in \\text{}?
-
-There should be NO exceptions. Pay special attention to continuous expressions and long formulas to prevent rendering errors.
-"""
+    "Following these guidelines—rather than forbidding too many formats—ensures that both simple and复杂的 LaTeX 都能被正确捕获并渲染。\n"
+)
