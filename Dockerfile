@@ -10,8 +10,6 @@ WORKDIR ${APP_HOME}
 RUN mkdir -p ${APP_HOME}/${TEMP_UPLOAD_DIR_NAME} && \
     chmod 777 ${APP_HOME}/${TEMP_UPLOAD_DIR_NAME}
 
-COPY gen-lang-client-0550427988-f31c34047676.json /app/gcp_key.json
-ENV GOOGLE_APPLICATION_CREDENTIALS="/app/gcp_key.json"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
