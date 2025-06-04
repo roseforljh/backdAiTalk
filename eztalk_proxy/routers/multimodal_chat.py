@@ -22,12 +22,20 @@ from eztalk_proxy.multimodal_models import (
     IncomingApiContentPart,
     PyFileUriContentPart
 )
-from eztalk_proxy.config import COMMON_HEADERS, API_TIMEOUT, GEMINI_SUPPORTED_UPLOAD_MIMETYPES
+from eztalk_proxy.config import (
+    COMMON_HEADERS, 
+    API_TIMEOUT, 
+    GEMINI_SUPPORTED_UPLOAD_MIMETYPES,
+    GEMINI_ENABLE_GCS_UPLOAD, # 新增导入
+    GCS_BUCKET_NAME,          # 新增导入
+    GCS_PROJECT_ID            # 新增导入
+)
 from eztalk_proxy.utils import (
     get_current_time_iso,
     orjson_dumps_bytes_wrapper,
     strip_potentially_harmful_html_and_normalize_newlines,
-    extract_sse_lines
+    extract_sse_lines,
+    upload_to_gcs # 新增导入
 )
 from eztalk_proxy.multimodal_api_helpers import (
     prepare_gemini_rest_api_request
@@ -35,6 +43,17 @@ from eztalk_proxy.multimodal_api_helpers import (
 from eztalk_proxy.web_search import perform_web_search, generate_search_context_message_content
 
 logger = logging.getLogger("EzTalkProxy.Routers.MultimodalChat")
+
+# 定义图片和视频/音频的MIME类型，以便区分处理路径
+IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"]
+VIDEO_AUDIO_MIME_TYPES = [
+    "video/mp4", "application/mp4", "video/mpeg", "video/quicktime", "video/x-msvideo", 
+    "video/x-flv", "video/x-matroska", "video/webm", "video/x-ms-wmv", 
+    "video/3gpp", "video/x-m4v", "audio/wav", "audio/x-wav", "audio/mpeg", 
+    "audio/aac", "audio/ogg", "audio/opus", "audio/flac", "audio/midi", 
+    "audio/amr", "audio/aiff", "audio/x-m4a"
+]
+
 
 async def sse_event_serializer_rest(event_data: AppStreamEventPy) -> bytes:
     return orjson_dumps_bytes_wrapper(event_data.model_dump(by_alias=True, exclude_none=True))
@@ -46,7 +65,7 @@ async def generate_gemini_rest_api_events_with_docs(
     request_id: str,
     uploaded_files_for_gemini: Optional[List[UploadFile]],
     additional_extracted_text: Optional[str],
-    temp_files_to_delete_after_stream: List[str]
+    temp_files_to_delete_after_stream: List[str] # 这些是文本提取产生的临时文件
 ) -> AsyncGenerator[bytes, None]:
     log_prefix = f"RID-{request_id}"
     first_chunk_received_from_llm = False
@@ -55,19 +74,49 @@ async def generate_gemini_rest_api_events_with_docs(
     _reasoning_finish_event_sent_flag = False
     
     active_messages_for_llm: List[AbstractApiMessagePy] = []
+    gcs_uris_created_this_request: List[str] = [] # 跟踪此请求中创建的GCS URI，以便清理（如果需要）
 
     for msg_abstract_orig in gemini_chat_input.messages:
         active_messages_for_llm.append(msg_abstract_orig.model_copy(deep=True))
 
     newly_created_multimodal_parts: List[IncomingApiContentPart] = []
+    
     if uploaded_files_for_gemini:
         logger.info(f"{log_prefix}: Processing {len(uploaded_files_for_gemini)} uploaded files for Gemini multimodal content.")
         for uploaded_file in uploaded_files_for_gemini:
-            mime_type = uploaded_file.content_type
+            mime_type = uploaded_file.content_type.lower() if uploaded_file.content_type else ""
             filename = uploaded_file.filename or "unknown_file"
-            
-            if mime_type and mime_type.lower() in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
-                try:
+            file_processed_for_gemini = False
+
+            try:
+                if GEMINI_ENABLE_GCS_UPLOAD and mime_type in VIDEO_AUDIO_MIME_TYPES and GCS_BUCKET_NAME:
+                    logger.info(f"{log_prefix}: Attempting GCS upload for '{filename}' (MIME: {mime_type}).")
+                    await uploaded_file.seek(0) #确保从头读取
+                    gcs_uri = await upload_to_gcs(
+                        file_obj=uploaded_file, # 传递 UploadFile 对象
+                        original_filename=filename,
+                        bucket_name=GCS_BUCKET_NAME,
+                        project_id=GCS_PROJECT_ID,
+                        content_type=mime_type,
+                        request_id=request_id
+                    )
+                    if gcs_uri:
+                        file_uri_part = PyFileUriContentPart(
+                            type="file_uri_content",
+                            uri=gcs_uri,
+                            mimeType=mime_type
+                        )
+                        newly_created_multimodal_parts.append(file_uri_part)
+                        gcs_uris_created_this_request.append(gcs_uri) # 可选：用于后续可能的清理
+                        logger.info(f"{log_prefix}: Successfully uploaded '{filename}' to GCS: {gcs_uri}")
+                        file_processed_for_gemini = True
+                    else:
+                        logger.warning(f"{log_prefix}: GCS upload failed for '{filename}'. Will not be used for Gemini content part.")
+                
+                # 如果不是GCS路径，或者是GCS路径但上传失败，并且是支持的图像类型，则尝试Base64
+                if not file_processed_for_gemini and mime_type in IMAGE_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Attempting Base64 encoding for image '{filename}' (MIME: {mime_type}).")
+                    await uploaded_file.seek(0)
                     file_content_bytes = await uploaded_file.read()
                     base64_encoded_data = base64.b64encode(file_content_bytes).decode('utf-8')
                     inline_part = PyInlineDataContentPart(
@@ -76,15 +125,29 @@ async def generate_gemini_rest_api_events_with_docs(
                         base64Data=base64_encoded_data
                     )
                     newly_created_multimodal_parts.append(inline_part)
-                    logger.info(f"{log_prefix}: Successfully encoded '{filename}' for Gemini.")
-                except Exception as e_file_proc:
-                    logger.error(f"{log_prefix}: Error processing file '{filename}' for Gemini: {e_file_proc}", exc_info=True)
-                finally:
-                    await uploaded_file.close()
-            else:
-                logger.warning(f"{log_prefix}: Skipping file '{filename}' with unsupported MIME type '{mime_type}' for Gemini direct multimodal input.")
-                await uploaded_file.close()
+                    logger.info(f"{log_prefix}: Successfully Base64 encoded '{filename}' for Gemini.")
+                    file_processed_for_gemini = True
 
+                if not file_processed_for_gemini:
+                    if mime_type and mime_type not in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
+                         logger.warning(f"{log_prefix}: Skipping file '{filename}' with unsupported MIME type '{mime_type}' for Gemini direct multimodal input.")
+                    elif not mime_type:
+                         logger.warning(f"{log_prefix}: Skipping file '{filename}' due to missing MIME type for Gemini direct multimodal input.")
+                    else:
+                         logger.warning(f"{log_prefix}: File '{filename}' (MIME: {mime_type}) was not processed for Gemini content (GCS disabled/failed and not a Base64 image).")
+
+            except Exception as e_file_proc:
+                logger.error(f"{log_prefix}: Error processing file '{filename}' for Gemini: {e_file_proc}", exc_info=True)
+            finally:
+                # 关闭由这个函数处理的文件流。
+                # 如果文件被传递给 upload_to_gcs，它会在内部读取。
+                # 如果文件被 Base64 编码，它也被读取了。
+                try:
+                    await uploaded_file.close()
+                    logger.debug(f"{log_prefix}: Closed uploaded file '{filename}' after processing in multimodal_chat.")
+                except Exception as e_close:
+                    logger.warning(f"{log_prefix}: Error closing uploaded file '{filename}': {e_close}")
+    
     if additional_extracted_text:
         logger.info(f"{log_prefix}: Adding additionally extracted text (len: {len(additional_extracted_text)}) as a text part for Gemini.")
         doc_text_part = PyTextContentPart(type="text_content", text=additional_extracted_text)
@@ -102,22 +165,16 @@ async def generate_gemini_rest_api_events_with_docs(
             if isinstance(user_msg_abstract, PartsApiMessagePy):
                 updated_parts = list(user_msg_abstract.parts) + newly_created_multimodal_parts
                 active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
-                    role=user_msg_abstract.role,
-                    parts=updated_parts,
-                    message_type="parts_message",
-                    name=user_msg_abstract.name,
-                    tool_calls=user_msg_abstract.tool_calls,
+                    role=user_msg_abstract.role, parts=updated_parts, message_type="parts_message",
+                    name=user_msg_abstract.name, tool_calls=user_msg_abstract.tool_calls,
                     tool_call_id=user_msg_abstract.tool_call_id
                 )
             elif isinstance(user_msg_abstract, SimpleTextApiMessagePy):
                 initial_text_part = [PyTextContentPart(type="text_content", text=user_msg_abstract.content)] if user_msg_abstract.content else []
                 combined_parts = initial_text_part + newly_created_multimodal_parts
                 active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
-                    role=user_msg_abstract.role,
-                    parts=combined_parts,
-                    message_type="parts_message",
-                    name=user_msg_abstract.name,
-                    tool_calls=user_msg_abstract.tool_calls,
+                    role=user_msg_abstract.role, parts=combined_parts, message_type="parts_message",
+                    name=user_msg_abstract.name, tool_calls=user_msg_abstract.tool_calls,
                     tool_call_id=user_msg_abstract.tool_call_id
                 )
         else:
@@ -131,9 +188,7 @@ async def generate_gemini_rest_api_events_with_docs(
                 final_parts_for_new_message.append(PyTextContentPart(type="text_content", text=default_prompt_for_multimodal))
             final_parts_for_new_message.extend(newly_created_multimodal_parts)
             new_user_message = PartsApiMessagePy(
-                role="user",
-                parts=final_parts_for_new_message,
-                message_type="parts_message"
+                role="user", parts=final_parts_for_new_message, message_type="parts_message"
             )
             active_messages_for_llm.append(new_user_message)
 
@@ -158,9 +213,7 @@ async def generate_gemini_rest_api_events_with_docs(
             search_context_parts = [PyTextContentPart(type="text_content", text=search_context_content)]
             try:
                 search_context_api_message = PartsApiMessagePy(
-                    role="user",
-                    parts=search_context_parts,
-                    message_type="parts_message"
+                    role="user", parts=search_context_parts, message_type="parts_message"
                 )
                 last_user_idx = -1
                 for i, msg_abstract_loop in reversed(list(enumerate(active_messages_for_llm))):
@@ -346,16 +399,22 @@ async def generate_gemini_rest_api_events_with_docs(
                  yield await sse_event_serializer_rest(AppStreamEventPy(type="reasoning_finish", timestamp=get_current_time_iso()))
             yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="cleanup_stream_end_gemini_rest", timestamp=get_current_time_iso()))
         
-        if temp_files_to_delete_after_stream:
-            logger.info(f"{log_prefix}: Deleting {len(temp_files_to_delete_after_stream)} temporary document file(s) passed from caller.")
+        if temp_files_to_delete_after_stream: # 这些是文本提取的临时文件
+            logger.info(f"{log_prefix}: Deleting {len(temp_files_to_delete_after_stream)} temporary document file(s) passed from caller (chat.py).")
             for temp_file in temp_files_to_delete_after_stream:
                 try:
                     if os.path.exists(temp_file): 
                         os.remove(temp_file)
                 except Exception as e_del: 
                     logger.error(f"{log_prefix}: Error deleting temp file {temp_file}: {e_del}")
+        
+        # 注意：GCS 上的文件清理逻辑需要单独考虑。
+        # 可以在这里添加，或者通过 GCS Bucket 的生命周期规则管理。
+        # if gcs_uris_created_this_request:
+        #    logger.info(f"{log_prefix}: TODO: Implement cleanup for GCS files: {gcs_uris_created_this_request}")
 
-async def handle_gemini_request_entry(
+
+async def handle_gemini_request_entry( # 这个函数似乎没有被直接调用，但保持其结构
     gemini_chat_input: ChatRequestModel,
     raw_request: Request,
     http_client: httpx.AsyncClient,
@@ -368,7 +427,7 @@ async def handle_gemini_request_entry(
              fastapi_request_obj=raw_request,
              http_client=http_client,
              request_id=request_id,
-             uploaded_files_for_gemini=None,
+             uploaded_files_for_gemini=None, # 假设此入口不直接处理文件上传
              additional_extracted_text=None,
              temp_files_to_delete_after_stream=[]
         ),

@@ -5,20 +5,37 @@ import re
 import logging
 import datetime
 from typing import Any, Dict, List, Tuple, Optional
-import os # 新增导入
-import shutil # 新增导入
+import os
+import shutil
+import uuid # 确保 uuid 已导入，如果 upload_to_gcs 中要用随机blob名
 
 from fastapi.responses import JSONResponse
+from fastapi import UploadFile # 导入 UploadFile 以便类型提示
 
-from .config import ( # 确保从 config 导入新加的配置
+from .config import ( 
     COMMON_HEADERS,
     MAX_SSE_LINE_LENGTH,
-    TEMP_UPLOAD_DIR, # 新增
-    SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION, # 新增
-    MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT # 新增
+    TEMP_UPLOAD_DIR, 
+    SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION, 
+    MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT,
+    # GCS 相关配置，虽然在这里不直接使用，但导入以表明 utils 中可能有 GCS 相关功能
+    # GEMINI_ENABLE_GCS_UPLOAD, # 这些在调用函数时传入，不在 utils 中直接使用
+    # GCS_BUCKET_NAME,
+    # GCS_PROJECT_ID
 )
 
-# 尝试导入文档处理库，如果失败则记录警告，相关功能将受限
+# 尝试导入文档处理库和 GCS 库
+try:
+    from google.cloud import storage
+    from google.auth.exceptions import DefaultCredentialsError
+except ImportError:
+    storage = None # type: ignore
+    DefaultCredentialsError = None # type: ignore
+    logging.warning(
+        "google-cloud-storage or google-auth library not found. "
+        "GCS upload functionality for large files (video/audio) for Gemini will not be available."
+    )
+
 try:
     import PyPDF2 # 用于 PDF
 except ImportError:
@@ -30,13 +47,6 @@ try:
 except ImportError:
     docx = None
     logging.warning("python-docx library not found. DOCX text extraction will not be available.")
-
-# try:
-#     import magic # python-magic, 用于更可靠的MIME类型检测 (可选)
-# except ImportError:
-#     magic = None
-#     logging.warning("python-magic library not found. Advanced MIME type detection will rely on browser-provided types.")
-
 
 logger = logging.getLogger("EzTalkProxy.Utils")
 
@@ -129,7 +139,7 @@ def is_gemini_2_5_model(model_name: str) -> bool:
         return False
     return "gemini-2.5" in model_name.lower()
 
-# --- 新增：文档处理辅助函数 ---
+# --- 文档处理辅助函数 ---
 
 def _extract_text_from_pdf_pypdf2(file_path: str) -> Optional[str]:
     """使用 PyPDF2 从 PDF 文件中提取文本。"""
@@ -142,23 +152,22 @@ def _extract_text_from_pdf_pypdf2(file_path: str) -> Optional[str]:
             reader = PyPDF2.PdfReader(f)
             if reader.is_encrypted:
                 try:
-                    # 尝试用空密码解密，对某些保护性PDF可能有效
                     if reader.decrypt("") == PyPDF2.PasswordType.OWNER_PASSWORD or \
                        reader.decrypt("") == PyPDF2.PasswordType.USER_PASSWORD :
                         logger.info(f"Successfully decrypted PDF (with empty password): {file_path}")
                     else:
                         logger.warning(f"PDF file is encrypted and could not be decrypted with an empty password: {file_path}")
-                        return None # Or some indicator of encryption
+                        return None 
                 except Exception as decrypt_err:
                     logger.warning(f"Failed to decrypt PDF {file_path}: {decrypt_err}")
                     return None
 
             for page in reader.pages:
                 try:
-                    text_content += page.extract_text() or "" # Add "or """ to handle None from extract_text
+                    text_content += page.extract_text() or "" 
                 except Exception as page_extract_err:
                     logger.warning(f"Error extracting text from a page in {file_path}: {page_extract_err}")
-                    continue # 继续处理下一页
+                    continue 
         return text_content.strip()
     except FileNotFoundError:
         logger.error(f"PDF file not found for extraction: {file_path}")
@@ -185,7 +194,7 @@ def _extract_text_from_docx_python_docx(file_path: str) -> Optional[str]:
 
 def _extract_text_from_plain_text(file_path: str) -> Optional[str]:
     """从纯文本文件中提取文本 (尝试多种编码)。"""
-    common_encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'iso-8859-1'] # 可以根据需要调整
+    common_encodings = ['utf-8', 'gbk', 'gb2312', 'latin-1', 'iso-8859-1'] 
     try:
         for encoding in common_encodings:
             try:
@@ -198,7 +207,7 @@ def _extract_text_from_plain_text(file_path: str) -> Optional[str]:
                 logger.error(f"Plain text file not found for extraction: {file_path}")
                 return None
         logger.warning(f"Could not decode plain text file {file_path} with common encodings.")
-        return None # 如果所有尝试都失败
+        return None 
     except Exception as e:
         logger.error(f"Error extracting text from plain text file {file_path}: {e}", exc_info=True)
         return None
@@ -208,24 +217,8 @@ async def extract_text_from_uploaded_document(
     mime_type: Optional[str],
     original_filename: str
 ) -> Optional[str]:
-    """
-    根据MIME类型从上传的文档（已保存到临时路径）中提取文本。
-    返回提取的文本或None（如果不支持或提取失败）。
-    """
     logger.info(f"Attempting to extract text from '{original_filename}' (path: {uploaded_file_path}, mime: {mime_type})")
-    
-    # 优先使用传入的 MIME 类型，如果它在支持列表中
     effective_mime_type = mime_type.lower() if mime_type else None
-
-    # （可选）如果 mime_type 不可靠或未知，可以使用 python-magic 进行更准确的检测
-    # if magic and (not effective_mime_type or effective_mime_type == "application/octet-stream"):
-    #     try:
-    #         detected_mime = magic.from_file(uploaded_file_path, mime=True)
-    #         if detected_mime and detected_mime != effective_mime_type:
-    #             logger.info(f"MIME type detected by python-magic for '{original_filename}': {detected_mime} (original: {mime_type})")
-    #             effective_mime_type = detected_mime.lower()
-    #     except Exception as e_magic:
-    #         logger.warning(f"Error using python-magic for '{original_filename}': {e_magic}")
 
     if not effective_mime_type:
         logger.warning(f"No effective MIME type for '{original_filename}', cannot determine extraction method.")
@@ -238,17 +231,13 @@ async def extract_text_from_uploaded_document(
             extracted_text = _extract_text_from_pdf_pypdf2(uploaded_file_path)
         elif effective_mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             extracted_text = _extract_text_from_docx_python_docx(uploaded_file_path)
-        elif effective_mime_type == "application/msword": # .doc 文件
-            # .doc 文件提取比较麻烦，通常需要 unoconv (依赖 LibreOffice) 或其他特定库
-            # 这里暂时返回一个提示，或尝试简单的文本提取（如果文件内容是纯文本）
+        elif effective_mime_type == "application/msword": 
             logger.warning(f"Basic text extraction for .doc ('{original_filename}') is not robust. Full content might not be extracted.")
-            extracted_text = _extract_text_from_plain_text(uploaded_file_path) # 尝试作为纯文本读取
+            extracted_text = _extract_text_from_plain_text(uploaded_file_path) 
             if not extracted_text:
                  extracted_text = "[后端提示：.doc 文件内容提取可能不完整或失败]"
-        elif effective_mime_type.startswith("text/"): # 包括 text/plain, text/markdown, text/csv 等
+        elif effective_mime_type.startswith("text/"): 
             extracted_text = _extract_text_from_plain_text(uploaded_file_path)
-        # 你可以在这里添加对其他 SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION 中类型的处理
-        # 例如: CSV 或 Markdown 可能需要不同的处理方式或直接使用文本
         else:
             logger.info(f"MIME type '{effective_mime_type}' for '{original_filename}' is in supported list but no specific extractor implemented, attempting plain text.")
             extracted_text = _extract_text_from_plain_text(uploaded_file_path)
@@ -268,3 +257,72 @@ async def extract_text_from_uploaded_document(
         return None
 
 # --- 文档处理辅助函数结束 ---
+
+# --- GCS 上传辅助函数 ---
+async def upload_to_gcs(
+    file_obj: Any, # Can be UploadFile.file (SpooledTemporaryFile) or a file path string
+    original_filename: str, # Used for generating a unique blob name
+    bucket_name: str,
+    project_id: Optional[str] = None,
+    content_type: Optional[str] = None,
+    request_id: Optional[str] = None
+) -> Optional[str]:
+    """
+    Uploads a file object or file from a path to Google Cloud Storage.
+    Returns the GCS URI (gs://bucket_name/destination_blob_name) if successful, else None.
+    """
+    log_prefix = f"RID-{request_id}" if request_id else "[GCS_UPLOAD]"
+    
+    if not storage:
+        logger.error(f"{log_prefix} GCS upload skipped: google-cloud-storage library not available.")
+        return None
+    if not bucket_name:
+        logger.error(f"{log_prefix} GCS upload skipped: GCS_BUCKET_NAME is not configured.")
+        return None
+
+    # Generate a unique blob name to avoid collisions
+    _, file_extension = os.path.splitext(original_filename)
+    # Sanitize original_filename part for blob name
+    safe_original_filename_part = "".join(c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in original_filename.rsplit('.', 1)[0])[:50]
+    destination_blob_name = f"uploads/{request_id or 'unknown_req'}/{safe_original_filename_part}_{uuid.uuid4().hex[:8]}{file_extension}"
+
+    logger.info(f"{log_prefix} Attempting to upload to GCS: bucket='{bucket_name}', blob='{destination_blob_name}'")
+
+    try:
+        if project_id:
+            storage_client = storage.Client(project=project_id)
+        else:
+            # GOOGLE_APPLICATION_CREDENTIALS env var should be set for this to work
+            storage_client = storage.Client() 
+            
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob_name)
+
+        if isinstance(file_obj, UploadFile): # FastAPI UploadFile
+            await file_obj.seek(0) # Ensure reading from the beginning
+            blob.upload_from_file(file_obj.file, content_type=content_type or file_obj.content_type)
+        elif hasattr(file_obj, 'read') and hasattr(file_obj, 'seek'): # Generic file-like object
+            file_obj.seek(0) 
+            blob.upload_from_file(file_obj, content_type=content_type)
+        elif isinstance(file_obj, str) and os.path.exists(file_obj): # File path
+            blob.upload_from_filename(file_obj, content_type=content_type)
+        else:
+            logger.error(f"{log_prefix} GCS upload failed for '{original_filename}': Invalid file_obj type or file path does not exist.")
+            return None
+
+        gcs_uri = f"gs://{bucket_name}/{destination_blob_name}"
+        logger.info(f"{log_prefix} Successfully uploaded '{original_filename}' to GCS: {gcs_uri}")
+        return gcs_uri
+    except DefaultCredentialsError:
+        logger.error(
+            f"{log_prefix} GCS upload failed for '{original_filename}': Google Cloud Default Credentials not found. "
+            "Ensure GOOGLE_APPLICATION_CREDENTIALS environment variable is set correctly "
+            "or the runtime environment has appropriate GCS permissions.",
+            exc_info=True 
+        )
+        return None
+    except Exception as e:
+        logger.error(f"{log_prefix} GCS upload failed for '{original_filename}' (blob '{destination_blob_name}'): {e}", exc_info=True)
+        return None
+
+# --- GCS 上传辅助函数结束 ---

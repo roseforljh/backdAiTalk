@@ -3,9 +3,10 @@ import logging
 import httpx
 import orjson
 import asyncio
+import base64 # 新增导入
 import shutil
 import uuid
-from typing import Optional, Dict, Any, AsyncGenerator, List
+from typing import Optional, Dict, Any, AsyncGenerator, List, Union # 新增 Union
 
 from fastapi import APIRouter, Depends, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
@@ -84,7 +85,10 @@ async def chat_proxy_entrypoint(
     temp_files_created_for_text_extraction: List[str] = []
     
     files_for_gemini_multimodal_direct_pass: List[UploadFile] = []
+    base64_encoded_parts_for_openai: List[Dict[str, Any]] = [] 
     
+    SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+
     if uploaded_documents:
         logger.info(f"{log_prefix}: Processing {len(uploaded_documents)} uploaded items.")
         if not os.path.exists(TEMP_UPLOAD_DIR):
@@ -119,8 +123,28 @@ async def chat_proxy_entrypoint(
             except Exception as e_size:
                 logger.warning(f"{log_prefix}: Could not reliably determine size of '{doc_file.filename}'. Error: {e_size}. Proceeding.")
 
-            files_for_gemini_multimodal_direct_pass.append(doc_file)
+            files_for_gemini_multimodal_direct_pass.append(doc_file) # Always add for Gemini path or for FastAPI to close
+
+            is_openai_compatible_vision_path = not (chat_input.provider.lower() == "google" and chat_input.model.lower().startswith("gemini"))
+            should_attempt_text_extraction = True
+
+            if is_openai_compatible_vision_path and doc_file.content_type and doc_file.content_type.lower() in SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI:
+                try:
+                    logger.info(f"{log_prefix}: Processing image '{doc_file.filename}' for OpenAI Vision. MIME: {doc_file.content_type}")
+                    await doc_file.seek(0)
+                    image_bytes = await doc_file.read()
+                    base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')
+                    data_uri = f"data:{doc_file.content_type};base64,{base64_encoded_data}"
+                    base64_encoded_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
+                    await doc_file.seek(0) 
+                    logger.info(f"{log_prefix}: Successfully encoded '{doc_file.filename}' for OpenAI Vision.")
+                    should_attempt_text_extraction = False 
+                except Exception as e_img_proc:
+                    logger.error(f"{log_prefix}: Error processing image '{doc_file.filename}' for OpenAI Vision: {e_img_proc}", exc_info=True)
             
+            if not should_attempt_text_extraction:
+                continue 
+
             _, file_extension = os.path.splitext(doc_file.filename)
             if not file_extension: file_extension = ".tmp"
             safe_original_filename_part = "".join(c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in doc_file.filename.rsplit('.', 1)[0])[:50]
@@ -153,6 +177,7 @@ async def chat_proxy_entrypoint(
 
     if chat_input.provider.lower() == "google" and chat_input.model.lower().startswith("gemini"):
         logger.info(f"{log_prefix}: Provider is 'google' and model '{chat_input.model}' is Gemini. Dispatching to Gemini REST API multimodal handler.")
+        # Gemini path will handle closing files in files_for_gemini_multimodal_direct_pass
         return StreamingResponse(
             multimodal_router.generate_gemini_rest_api_events_with_docs(
                 gemini_chat_input=chat_input,
@@ -166,66 +191,120 @@ async def chat_proxy_entrypoint(
             media_type="text/event-stream",
             headers=COMMON_HEADERS
         )
-    else:
-        logger.info(f"{log_prefix}: Model '{chat_input.model}' with provider '{chat_input.provider}' will be handled by non-Gemini-REST path.")
+    else: # OpenAI compatible path (including Qwen, GPT, OpenAI-Gemini)
+        logger.info(f"{log_prefix}: Model '{chat_input.model}' with provider '{chat_input.provider}' will be handled by non-Gemini-REST (OpenAI compatible) path.")
         
-        for up_file in files_for_gemini_multimodal_direct_pass:
-            try: await up_file.close()
-            except Exception: pass
+        # Files in files_for_gemini_multimodal_direct_pass that were not consumed by Gemini
+        # (i.e., all of them if we are in this 'else' block) will be closed by FastAPI at request end.
+        # temp_files_created_for_text_extraction will be cleaned up by generate_non_gemini_events.
 
-        simple_text_messages_for_upstream: List[Dict[str, Any]] = []
+        messages_for_upstream: List[Dict[str, Any]] = []
         user_query_for_search = ""
         original_user_text_found = False
 
         for i, msg_abstract in enumerate(chat_input.messages):
-            current_message_content = ""
+            msg_dict: Dict[str, Any] = {"role": msg_abstract.role}
             is_last_user_message = (i == len(chat_input.messages) - 1 and msg_abstract.role == "user")
+            current_user_text_content = "" 
 
             if isinstance(msg_abstract, SimpleTextApiMessagePy):
-                current_message_content = msg_abstract.content or ""
-                msg_dict = {"role": msg_abstract.role, "content": current_message_content}
-                if msg_abstract.role == "user": original_user_text_found = True; user_query_for_search = current_message_content.strip()
-                if hasattr(msg_abstract, 'tool_calls') and msg_abstract.tool_calls: msg_dict["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in msg_abstract.tool_calls]
-                if msg_abstract.role == "tool":
-                    if hasattr(msg_abstract, 'tool_call_id') and msg_abstract.tool_call_id: msg_dict["tool_call_id"] = msg_abstract.tool_call_id
-                    if msg_abstract.name: msg_dict["name"] = msg_abstract.name
+                current_user_text_content = msg_abstract.content or ""
+                msg_dict["content"] = current_user_text_content 
+                if msg_abstract.role == "user":
+                    original_user_text_found = True
+                    user_query_for_search = current_user_text_content.strip()
                 
-                if is_last_user_message and combined_document_text_for_prompt:
-                    msg_dict["content"] = (current_message_content + "\n" + combined_document_text_for_prompt).strip()
-                    user_query_for_search = msg_dict["content"]
-                simple_text_messages_for_upstream.append(msg_dict)
+                if hasattr(msg_abstract, 'tool_calls') and msg_abstract.tool_calls:
+                    msg_dict["tool_calls"] = [tc.model_dump(exclude_none=True) for tc in msg_abstract.tool_calls]
+                if msg_abstract.role == "tool":
+                    if hasattr(msg_abstract, 'tool_call_id') and msg_abstract.tool_call_id:
+                        msg_dict["tool_call_id"] = msg_abstract.tool_call_id
+                    if msg_abstract.name: msg_dict["name"] = msg_abstract.name
 
             elif isinstance(msg_abstract, PartsApiMessagePy):
                 text_from_parts = " ".join([part.text for part in msg_abstract.parts if isinstance(part, PyTextContentPart) and part.text])
-                current_message_content = text_from_parts.strip()
-                if current_message_content:
-                    if msg_abstract.role == "user": original_user_text_found = True; user_query_for_search = current_message_content
-                    if is_last_user_message and combined_document_text_for_prompt:
-                        current_message_content = (current_message_content + "\n" + combined_document_text_for_prompt).strip()
-                        user_query_for_search = current_message_content
-                    simple_text_messages_for_upstream.append({"role": msg_abstract.role, "content": current_message_content})
-        
-        if not original_user_text_found and combined_document_text_for_prompt:
-            new_user_content_with_docs = f"请基于以下文档内容进行处理或回答：\n{combined_document_text_for_prompt}"
-            simple_text_messages_for_upstream.append({"role": "user", "content": new_user_content_with_docs})
-            user_query_for_search = new_user_content_with_docs
+                current_user_text_content = text_from_parts.strip()
+                # For OpenAI compatible, if original message was parts, we might want to pass it as such if helper supports it.
+                # For now, we extract text, and reconstruct as parts if it's the last user message with images/docs.
+                msg_dict["content"] = current_user_text_content 
+                if msg_abstract.role == "user" and current_user_text_content:
+                    original_user_text_found = True
+                    user_query_for_search = current_user_text_content
+            
+            if is_last_user_message:
+                final_content_parts_for_current_message: List[Dict[str, Any]] = []
+                
+                if current_user_text_content.strip():
+                    final_content_parts_for_current_message.append({"type": "text", "text": current_user_text_content.strip()})
+                
+                if combined_document_text_for_prompt:
+                    if final_content_parts_for_current_message and final_content_parts_for_current_message[0]["type"] == "text":
+                        final_content_parts_for_current_message[0]["text"] += "\n" + combined_document_text_for_prompt
+                    elif not final_content_parts_for_current_message:
+                        final_content_parts_for_current_message.insert(0, {"type": "text", "text": combined_document_text_for_prompt})
+                    else: 
+                         final_content_parts_for_current_message.append({"type": "text", "text": combined_document_text_for_prompt})
+                    user_query_for_search = (user_query_for_search + "\n" + combined_document_text_for_prompt).strip()
 
-        if not simple_text_messages_for_upstream or not any(m.get("role") != "system" for m in simple_text_messages_for_upstream):
-            if not any(m.get("role") == "system" and m.get("content") for m in simple_text_messages_for_upstream):
-                logger.warning(f"{log_prefix}: No processable non-system messages for non-Gemini-REST path.")
-                async def no_msg_gen_err():
-                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message="No processable messages for this model.", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
-                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason="bad_request", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
-                    for temp_file in temp_files_created_for_text_extraction:
-                        if os.path.exists(temp_file):
-                            try: os.remove(temp_file)
-                            except Exception as e_del_err: logger.error(f"{log_prefix}: Error deleting temp file {temp_file} in no_msg_gen_err: {e_del_err}")
-                return StreamingResponse(no_msg_gen_err(), media_type="text/event-stream", headers=COMMON_HEADERS)
+                if base64_encoded_parts_for_openai:
+                    if not final_content_parts_for_current_message or not any(p.get("type") == "text" and p.get("text","").strip() for p in final_content_parts_for_current_message):
+                         final_content_parts_for_current_message.insert(0, {"type": "text", "text": "请描述或分析以下图片和/或文档内容："})
+                    final_content_parts_for_current_message.extend(base64_encoded_parts_for_openai)
+                
+                if final_content_parts_for_current_message:
+                    if len(final_content_parts_for_current_message) == 1 and final_content_parts_for_current_message[0]["type"] == "text":
+                        msg_dict["content"] = final_content_parts_for_current_message[0]["text"]
+                    else: 
+                        msg_dict["content"] = final_content_parts_for_current_message
+                elif "content" not in msg_dict : 
+                     msg_dict["content"] = ""
+            
+            messages_for_upstream.append(msg_dict)
+        
+        if not original_user_text_found and (combined_document_text_for_prompt or base64_encoded_parts_for_openai):
+            new_user_content_parts: List[Dict[str, Any]] = []
+            default_prompt_text = "请基于以下文档内容和/或图片进行处理或回答："
+            
+            current_text_for_new_message = default_prompt_text
+            if combined_document_text_for_prompt:
+                current_text_for_new_message += "\n" + combined_document_text_for_prompt
+            
+            new_user_content_parts.append({"type": "text", "text": current_text_for_new_message.strip()})
+            user_query_for_search = current_text_for_new_message.strip()
+
+            if base64_encoded_parts_for_openai:
+                new_user_content_parts.extend(base64_encoded_parts_for_openai)
+            
+            final_content_for_new_user_message: Union[str, List[Dict[str, Any]]]
+            if len(new_user_content_parts) == 1 and new_user_content_parts[0]["type"] == "text":
+                final_content_for_new_user_message = new_user_content_parts[0]["text"]
+            else:
+                final_content_for_new_user_message = new_user_content_parts
+                
+            messages_for_upstream.append({"role": "user", "content": final_content_for_new_user_message})
+
+        if not messages_for_upstream or not any(m.get("role") != "system" for m in messages_for_upstream):
+            has_valid_user_content_in_messages = any(
+                (isinstance(m.get("content"), str) and m.get("content","").strip()) or 
+                (isinstance(m.get("content"), list) and any(p.get("type") == "text" and p.get("text","").strip() for p in m.get("content", []))) or
+                (isinstance(m.get("content"), list) and any(p.get("type") == "image_url" for p in m.get("content", [])))
+                for m in messages_for_upstream if m.get("role") == "user"
+            )
+            if not has_valid_user_content_in_messages and not any(m.get("role") == "system" and m.get("content","").strip() for m in messages_for_upstream):
+                 logger.warning(f"{log_prefix}: No processable non-system messages or valid user content for non-Gemini-REST path.")
+                 async def no_msg_gen_err():
+                     yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message="No processable messages for this model.", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+                     yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason="bad_request", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+                     for temp_file in temp_files_created_for_text_extraction:
+                         if os.path.exists(temp_file):
+                             try: os.remove(temp_file)
+                             except Exception as e_del_err: logger.error(f"{log_prefix}: Error deleting temp file {temp_file} in no_msg_gen_err: {e_del_err}")
+                 return StreamingResponse(no_msg_gen_err(), media_type="text/event-stream", headers=COMMON_HEADERS)
         
         return StreamingResponse(
             generate_non_gemini_events(
                 request_data=chat_input,
-                processed_upstream_messages=simple_text_messages_for_upstream,
+                processed_upstream_messages=messages_for_upstream, 
                 user_query_for_search=user_query_for_search,
                 http_client=http_client,
                 fastapi_request_obj=fastapi_request_obj,
@@ -280,7 +359,7 @@ async def generate_non_gemini_events(
     try:
         current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
             request_data=request_data,
-            processed_messages=final_messages_for_llm,
+            processed_messages=final_messages_for_llm, # This now can contain messages with list content
             request_id=request_id
         )
     except Exception as e_prepare:
@@ -308,7 +387,26 @@ async def generate_non_gemini_events(
     )
 
     try:
-        logger.debug(f"{log_prefix}: (Non-Gemini-REST) Sending to URL: {current_api_url}. Messages (content preview): {[str(m.get('content',''))[:70] + ('...' if len(str(m.get('content','')))>70 else '') for m in current_api_payload.get('messages',[])]}")
+        # Log a preview of the content, handling both string and list types
+        content_previews = []
+        for m_idx, m_val in enumerate(current_api_payload.get('messages',[])):
+            content_item = m_val.get('content','')
+            if isinstance(content_item, str):
+                preview = content_item[:70] + ('...' if len(content_item)>70 else '')
+            elif isinstance(content_item, list):
+                part_previews = []
+                for p_idx, p_val in enumerate(content_item):
+                    if p_val.get("type") == "text":
+                        part_text = p_val.get("text","")[:30] + "..."
+                        part_previews.append(f"TextPart[{p_idx}]:'{part_text}'")
+                    elif p_val.get("type") == "image_url":
+                        part_previews.append(f"ImagePart[{p_idx}]")
+                preview = f"MultiPart: [{', '.join(part_previews)}]"
+            else:
+                preview = "UnknownContentFormat"
+            content_previews.append(f"Msg[{m_idx}]: {preview}")
+        logger.debug(f"{log_prefix}: (Non-Gemini-REST) Sending to URL: {current_api_url}. Messages content preview: {content_previews}")
+
         async with http_client.stream(
             "POST", current_api_url,
             headers=current_api_headers,
