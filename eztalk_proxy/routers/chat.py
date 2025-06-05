@@ -477,16 +477,5 @@ async def generate_non_gemini_events(
             try:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
-            stream_proc_state, request_id, upstream_ok_flag,
-            use_old_custom_separator_branch_flag,
-            request_data.provider
-        ):
-            yield event_bytes
-        
-        logger.info(f"{log_prefix}: Deleting {len(temp_files_to_delete_after_stream)} temporary document file(s) for non-Gemini path.")
-        for temp_file in temp_files_to_delete_after_stream:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
             except Exception as e_del:
                 logger.error(f"{log_prefix}: Error deleting temp file {temp_file}: {e_del}")
