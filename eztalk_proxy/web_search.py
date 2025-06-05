@@ -11,7 +11,7 @@ from .config import GOOGLE_API_KEY_ENV, GOOGLE_CSE_ID, SEARCH_RESULT_COUNT, SEAR
 logger = logging.getLogger("EzTalkProxy.WebSearch")
 
 async def perform_web_search(query: str, rid: str) -> List[Dict[str, str]]:
-logger.info(f"RID-{rid}: perform_web_search called. Query: '{query}'. GOOGLE_API_KEY_ENV is set: {bool(GOOGLE_API_KEY_ENV)}, GOOGLE_CSE_ID is set: {bool(GOOGLE_CSE_ID)}")
+    logger.info(f"RID-{rid}: perform_web_search called. Query: '{query}'. GOOGLE_API_KEY_ENV is set: {bool(GOOGLE_API_KEY_ENV)}, GOOGLE_CSE_ID is set: {bool(GOOGLE_CSE_ID)}")
     results = []
     actual_google_api_key = GOOGLE_API_KEY_ENV
     if not actual_google_api_key or not GOOGLE_CSE_ID:
