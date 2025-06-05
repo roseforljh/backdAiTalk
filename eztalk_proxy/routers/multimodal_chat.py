@@ -200,7 +200,7 @@ async def generate_gemini_rest_api_events_with_docs(
                  user_query_for_search_gemini = last_user_message_for_search.content.strip()
     
     if gemini_chat_input.use_web_search and user_query_for_search_gemini:
-logger.info(f"{log_prefix}: Checking web search for Gemini. use_web_search: {gemini_chat_input.use_web_search}, user_query_for_search_gemini: '{user_query_for_search_gemini}'")
+        logger.info(f"{log_prefix}: Checking web search for Gemini. use_web_search: {gemini_chat_input.use_web_search}, user_query_for_search_gemini: '{user_query_for_search_gemini}'")
         yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="web_search_started", timestamp=get_current_time_iso()))
         search_results_list = await perform_web_search(user_query_for_search_gemini, request_id)
         if search_results_list:
