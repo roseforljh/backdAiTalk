@@ -16,4 +16,4 @@ COPY ./eztalk_proxy ${APP_HOME}/eztalk_proxy
 ENV PORT 7860
 EXPOSE ${PORT}
 
-CMD ["python", "eztalk_proxy/test_startup.py"]
+CMD /bin/sh -c "uvicorn eztalk_proxy.main:app --host 0.0.0.0 --port ${PORT}"
