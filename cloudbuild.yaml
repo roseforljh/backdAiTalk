@@ -1,0 +1,26 @@
+steps:
+  # 1. 构建 Docker 镜像 (你需要一个 Dockerfile)
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/backdatalk/backend:$COMMIT_SHA', '.'] # 请替换为你实际的 Artifact Registry 路径和镜像名
+
+  # 2. 推送 Docker 镜像到 Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/backdatalk/backend:$COMMIT_SHA'] # 请替换为你实际的 Artifact Registry 路径和镜像名
+
+  # 3. 部署到 Cloud Run (使用你之前推送的镜像)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'backdatalk'                                                                      # 你的 Cloud Run 服务名称
+      - '--image'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/backdatalk/backend:$COMMIT_SHA' # 确保与上面推送的镜像路径一致
+      - '--region'
+      - 'europe-west1'                                                                  # 你的 Cloud Run 服务所在区域
+      - '--platform'
+      - 'managed'
+      - '--quiet'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

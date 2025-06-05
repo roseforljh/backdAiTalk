@@ -20,4 +20,4 @@ COPY ./eztalk_proxy ${APP_HOME}/eztalk_proxy
 ENV PORT 7860
 EXPOSE ${PORT}
 
-CMD ["uvicorn", "eztalk_proxy.main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD /bin/sh -c "uvicorn eztalk_proxy.main:app --host 0.0.0.0 --port ${PORT}"
