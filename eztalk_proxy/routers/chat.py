@@ -320,8 +320,6 @@ async def generate_non_gemini_events(
     search_results_generated_this_time = False
 
     if request_data.use_web_search and user_query_for_search:
-logger.info(f"{log_prefix}: Checking web search for Non-Gemini. use_web_search: {request_data.use_web_search}, user_query_for_search: '{user_query_for_search}'")
-        logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search initiated for query: '{user_query_for_search[:100]}'")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_search_started", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
         
         search_results_list = await perform_web_search(user_query_for_search, request_id)
@@ -468,6 +466,17 @@ logger.info(f"{log_prefix}: Checking web search for Non-Gemini. use_web_search: 
     finally:
         logger.info(f"{log_prefix}: Cleaning up non-Gemini stream for model '{request_data.model}'.")
         async for event_bytes in handle_stream_cleanup(
+            stream_proc_state, request_id, upstream_ok_flag,
+            use_old_custom_separator_branch_flag,
+            request_data.provider
+        ):
+            yield event_bytes
+        
+        logger.info(f"{log_prefix}: Deleting {len(temp_files_to_delete_after_stream)} temporary document file(s) for non-Gemini path.")
+        for temp_file in temp_files_to_delete_after_stream:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
             stream_proc_state, request_id, upstream_ok_flag,
             use_old_custom_separator_branch_flag,
             request_data.provider
