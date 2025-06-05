@@ -20,6 +20,8 @@ steps:
       - 'europe-west1'                                                                  # 你的 Cloud Run 服务所在区域
       - '--platform'
       - 'managed'
+      - '--service-account'
+      - 'kunzzz@gen-lang-client-0550427988.iam.gserviceaccount.com'
       - '--quiet'
 
 options:
