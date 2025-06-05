@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Literal, Optional, Union, Annotated
 
-from .multimodal_models import IncomingApiContentPart, GenerationConfigPy # 从 multimodal_models 导入
+from .multimodal_models import IncomingApiContentPart, GenerationConfigPy
 
 class OpenAIToolCallFunction(BaseModel):
     name: Optional[str] = None
@@ -29,7 +29,7 @@ class SimpleTextApiMessagePy(BaseApiMessagePy):
 
 class PartsApiMessagePy(BaseApiMessagePy):
     message_type: Literal["parts_message"] = Field("parts_message", alias="type")
-    parts: List[IncomingApiContentPart] # 使用从 multimodal_models 导入的类型
+    parts: List[IncomingApiContentPart]
     tool_call_id: Optional[str] = None
     tool_calls: Optional[List[OpenAIToolCall]] = None
 
@@ -47,11 +47,10 @@ class ChatRequestModel(BaseModel):
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(None, alias="topP", ge=0.0, le=1.0)
     max_tokens: Optional[int] = Field(None, alias="maxTokens", gt=0)
-    generation_config: Optional[GenerationConfigPy] = Field(None, alias="generationConfig") # 使用导入的类型
+    generation_config: Optional[GenerationConfigPy] = Field(None, alias="generationConfig")
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, alias="toolChoice")
     use_web_search: Optional[bool] = Field(None, alias="useWebSearch")
-    # 新增 qwen_enable_search 以便在ChatRequestModel中明确处理
     qwen_enable_search: Optional[bool] = Field(None, alias="qwenEnableSearch")
     force_custom_reasoning_prompt: Optional[bool] = Field(None, alias="forceCustomReasoningPrompt")
     custom_model_parameters: Optional[Dict[str, Any]] = Field(None, alias="customModelParameters")

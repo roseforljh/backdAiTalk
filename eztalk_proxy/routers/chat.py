@@ -3,10 +3,10 @@ import logging
 import httpx
 import orjson
 import asyncio
-import base64 # 新增导入
+import base64
 import shutil
 import uuid
-from typing import Optional, Dict, Any, AsyncGenerator, List, Union # 新增 Union
+from typing import Optional, Dict, Any, AsyncGenerator, List, Union
 
 from fastapi import APIRouter, Depends, Request, HTTPException, File, UploadFile, Form
 from fastapi.responses import StreamingResponse
@@ -64,7 +64,6 @@ async def chat_proxy_entrypoint(
     logger.info(f"{log_prefix}: Received /chat request.")
 
     try:
-        logger.debug(f"{log_prefix}: Raw chat_request_json_str: {chat_request_json_str[:500]}...")
         chat_input_data = orjson.loads(chat_request_json_str)
         chat_input = ChatRequestModel(**chat_input_data)
         logger.info(f"{log_prefix}: Parsed ChatRequestModel successfully.")
@@ -85,7 +84,7 @@ async def chat_proxy_entrypoint(
     temp_files_created_for_text_extraction: List[str] = []
     
     files_for_gemini_multimodal_direct_pass: List[UploadFile] = []
-    base64_encoded_parts_for_openai: List[Dict[str, Any]] = [] 
+    base64_encoded_parts_for_openai: List[Dict[str, Any]] = []
     
     SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI = ["image/jpeg", "image/png", "image/gif", "image/webp"]
 
@@ -123,7 +122,7 @@ async def chat_proxy_entrypoint(
             except Exception as e_size:
                 logger.warning(f"{log_prefix}: Could not reliably determine size of '{doc_file.filename}'. Error: {e_size}. Proceeding.")
 
-            files_for_gemini_multimodal_direct_pass.append(doc_file) # Always add for Gemini path or for FastAPI to close
+            files_for_gemini_multimodal_direct_pass.append(doc_file)
 
             is_openai_compatible_vision_path = not (chat_input.provider.lower() == "google" and chat_input.model.lower().startswith("gemini"))
             should_attempt_text_extraction = True
@@ -136,14 +135,14 @@ async def chat_proxy_entrypoint(
                     base64_encoded_data = base64.b64encode(image_bytes).decode('utf-8')
                     data_uri = f"data:{doc_file.content_type};base64,{base64_encoded_data}"
                     base64_encoded_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
-                    await doc_file.seek(0) 
+                    await doc_file.seek(0)
                     logger.info(f"{log_prefix}: Successfully encoded '{doc_file.filename}' for OpenAI Vision.")
-                    should_attempt_text_extraction = False 
+                    should_attempt_text_extraction = False
                 except Exception as e_img_proc:
                     logger.error(f"{log_prefix}: Error processing image '{doc_file.filename}' for OpenAI Vision: {e_img_proc}", exc_info=True)
             
             if not should_attempt_text_extraction:
-                continue 
+                continue
 
             _, file_extension = os.path.splitext(doc_file.filename)
             if not file_extension: file_extension = ".tmp"
@@ -152,7 +151,6 @@ async def chat_proxy_entrypoint(
             temp_file_path = os.path.join(TEMP_UPLOAD_DIR, temp_filename)
             
             try:
-                logger.debug(f"{log_prefix}: Saving copy of '{doc_file.filename}' to '{temp_file_path}' for text extraction. MIME: {doc_file.content_type}")
                 with open(temp_file_path, "wb") as buffer:
                     await doc_file.seek(0)
                     shutil.copyfileobj(doc_file.file, buffer)
@@ -177,7 +175,6 @@ async def chat_proxy_entrypoint(
 
     if chat_input.provider.lower() == "google" and chat_input.model.lower().startswith("gemini"):
         logger.info(f"{log_prefix}: Provider is 'google' and model '{chat_input.model}' is Gemini. Dispatching to Gemini REST API multimodal handler.")
-        # Gemini path will handle closing files in files_for_gemini_multimodal_direct_pass
         return StreamingResponse(
             multimodal_router.generate_gemini_rest_api_events_with_docs(
                 gemini_chat_input=chat_input,
@@ -191,13 +188,9 @@ async def chat_proxy_entrypoint(
             media_type="text/event-stream",
             headers=COMMON_HEADERS
         )
-    else: # OpenAI compatible path (including Qwen, GPT, OpenAI-Gemini)
+    else:
         logger.info(f"{log_prefix}: Model '{chat_input.model}' with provider '{chat_input.provider}' will be handled by non-Gemini-REST (OpenAI compatible) path.")
         
-        # Files in files_for_gemini_multimodal_direct_pass that were not consumed by Gemini
-        # (i.e., all of them if we are in this 'else' block) will be closed by FastAPI at request end.
-        # temp_files_created_for_text_extraction will be cleaned up by generate_non_gemini_events.
-
         messages_for_upstream: List[Dict[str, Any]] = []
         user_query_for_search = ""
         original_user_text_found = False
@@ -205,11 +198,11 @@ async def chat_proxy_entrypoint(
         for i, msg_abstract in enumerate(chat_input.messages):
             msg_dict: Dict[str, Any] = {"role": msg_abstract.role}
             is_last_user_message = (i == len(chat_input.messages) - 1 and msg_abstract.role == "user")
-            current_user_text_content = "" 
+            current_user_text_content = ""
 
             if isinstance(msg_abstract, SimpleTextApiMessagePy):
                 current_user_text_content = msg_abstract.content or ""
-                msg_dict["content"] = current_user_text_content 
+                msg_dict["content"] = current_user_text_content
                 if msg_abstract.role == "user":
                     original_user_text_found = True
                     user_query_for_search = current_user_text_content.strip()
@@ -224,9 +217,7 @@ async def chat_proxy_entrypoint(
             elif isinstance(msg_abstract, PartsApiMessagePy):
                 text_from_parts = " ".join([part.text for part in msg_abstract.parts if isinstance(part, PyTextContentPart) and part.text])
                 current_user_text_content = text_from_parts.strip()
-                # For OpenAI compatible, if original message was parts, we might want to pass it as such if helper supports it.
-                # For now, we extract text, and reconstruct as parts if it's the last user message with images/docs.
-                msg_dict["content"] = current_user_text_content 
+                msg_dict["content"] = current_user_text_content
                 if msg_abstract.role == "user" and current_user_text_content:
                     original_user_text_found = True
                     user_query_for_search = current_user_text_content
@@ -242,7 +233,7 @@ async def chat_proxy_entrypoint(
                         final_content_parts_for_current_message[0]["text"] += "\n" + combined_document_text_for_prompt
                     elif not final_content_parts_for_current_message:
                         final_content_parts_for_current_message.insert(0, {"type": "text", "text": combined_document_text_for_prompt})
-                    else: 
+                    else:
                          final_content_parts_for_current_message.append({"type": "text", "text": combined_document_text_for_prompt})
                     user_query_for_search = (user_query_for_search + "\n" + combined_document_text_for_prompt).strip()
 
@@ -254,9 +245,9 @@ async def chat_proxy_entrypoint(
                 if final_content_parts_for_current_message:
                     if len(final_content_parts_for_current_message) == 1 and final_content_parts_for_current_message[0]["type"] == "text":
                         msg_dict["content"] = final_content_parts_for_current_message[0]["text"]
-                    else: 
+                    else:
                         msg_dict["content"] = final_content_parts_for_current_message
-                elif "content" not in msg_dict : 
+                elif "content" not in msg_dict :
                      msg_dict["content"] = ""
             
             messages_for_upstream.append(msg_dict)
@@ -285,7 +276,7 @@ async def chat_proxy_entrypoint(
 
         if not messages_for_upstream or not any(m.get("role") != "system" for m in messages_for_upstream):
             has_valid_user_content_in_messages = any(
-                (isinstance(m.get("content"), str) and m.get("content","").strip()) or 
+                (isinstance(m.get("content"), str) and m.get("content","").strip()) or
                 (isinstance(m.get("content"), list) and any(p.get("type") == "text" and p.get("text","").strip() for p in m.get("content", []))) or
                 (isinstance(m.get("content"), list) and any(p.get("type") == "image_url" for p in m.get("content", [])))
                 for m in messages_for_upstream if m.get("role") == "user"
@@ -304,7 +295,7 @@ async def chat_proxy_entrypoint(
         return StreamingResponse(
             generate_non_gemini_events(
                 request_data=chat_input,
-                processed_upstream_messages=messages_for_upstream, 
+                processed_upstream_messages=messages_for_upstream,
                 user_query_for_search=user_query_for_search,
                 http_client=http_client,
                 fastapi_request_obj=fastapi_request_obj,
@@ -359,7 +350,7 @@ async def generate_non_gemini_events(
     try:
         current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
             request_data=request_data,
-            processed_messages=final_messages_for_llm, # This now can contain messages with list content
+            processed_messages=final_messages_for_llm,
             request_id=request_id
         )
     except Exception as e_prepare:
@@ -387,7 +378,6 @@ async def generate_non_gemini_events(
     )
 
     try:
-        # Log a preview of the content, handling both string and list types
         content_previews = []
         for m_idx, m_val in enumerate(current_api_payload.get('messages',[])):
             content_item = m_val.get('content','')
@@ -405,7 +395,6 @@ async def generate_non_gemini_events(
             else:
                 preview = "UnknownContentFormat"
             content_previews.append(f"Msg[{m_idx}]: {preview}")
-        logger.debug(f"{log_prefix}: (Non-Gemini-REST) Sending to URL: {current_api_url}. Messages content preview: {content_previews}")
 
         async with http_client.stream(
             "POST", current_api_url,
@@ -420,7 +409,7 @@ async def generate_non_gemini_events(
                 logger.error(f"{log_prefix}: (Non-Gemini-REST) Upstream LLM error {response.status_code}: {err_text[:1000]}")
                 yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=f"LLM API Error: {err_text[:200]}", upstream_status=response.status_code, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
                 upstream_ok_flag = False
-                return 
+                return
 
             upstream_ok_flag = True
             async for raw_chunk_bytes in response.aiter_raw():
@@ -448,14 +437,14 @@ async def generate_non_gemini_events(
                         logger.info(f"{log_prefix}: Received [DONE] from non-Gemini endpoint.")
                         stream_proc_state["final_finish_reason_from_llm"] = stream_proc_state.get("final_finish_reason_from_llm","stop")
                         stream_proc_state["final_finish_event_sent_by_llm_reason"] = True
-                        break 
+                        break
 
                     try:
                         parsed_sse_data = orjson.loads(sse_data_bytes)
                         async for event_dict in process_openai_like_sse_stream(parsed_sse_data, stream_proc_state, request_id):
                             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event_dict).model_dump(by_alias=True, exclude_none=True))
                             if event_dict.get("type") == "finish" or stream_proc_state.get("final_finish_event_sent_by_llm_reason"):
-                                return 
+                                return
                     except orjson.JSONDecodeError:
                         logger.warning(f"{log_prefix}: Failed to parse non-Gemini SSE JSON: {sse_data_bytes.decode(errors='ignore')[:100]}")
                     except Exception as e_proc_sse:

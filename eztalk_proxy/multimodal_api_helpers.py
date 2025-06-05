@@ -93,7 +93,6 @@ def prepare_gemini_rest_api_request(
         if isinstance(msg_abstract, PartsApiMessagePy):
             messages_to_convert_or_use.append(msg_abstract)
         elif isinstance(msg_abstract, SimpleTextApiMessagePy):
-            logger.debug(f"{log_prefix}: Converting SimpleTextApiMessagePy (role: {msg_abstract.role}) to PartsApiMessagePy for Gemini REST preparation.")
             text_part = PyTextContentPart(type="text_content", text=msg_abstract.content or "")
             parts_message_equivalent = PartsApiMessagePy(
                 role=msg_abstract.role,
@@ -122,11 +121,11 @@ def prepare_gemini_rest_api_request(
         if gc_in.thinking_config:
             tc_in = gc_in.thinking_config
             thinking_config_for_gen_config: Dict[str, Any] = {}
-            if tc_in.include_thoughts is not None: 
+            if tc_in.include_thoughts is not None:
                 thinking_config_for_gen_config["includeThoughts"] = tc_in.include_thoughts
-            if tc_in.thinking_budget is not None and ("flash" in model_name.lower() or is_gemini_2_5_model(model_name)): 
+            if tc_in.thinking_budget is not None and ("flash" in model_name.lower() or is_gemini_2_5_model(model_name)):
                 thinking_config_for_gen_config["thinkingBudget"] = tc_in.thinking_budget
-            if thinking_config_for_gen_config: 
+            if thinking_config_for_gen_config:
                 generation_config_rest["thinkingConfig"] = thinking_config_for_gen_config
     
     if "temperature" not in generation_config_rest and chat_input.temperature is not None:
@@ -136,7 +135,7 @@ def prepare_gemini_rest_api_request(
     if "maxOutputTokens" not in generation_config_rest and chat_input.max_tokens is not None:
         generation_config_rest["maxOutputTokens"] = chat_input.max_tokens
     
-    if generation_config_rest: 
+    if generation_config_rest:
         json_payload["generationConfig"] = generation_config_rest
 
     if chat_input.tools:
@@ -179,6 +178,5 @@ def prepare_gemini_rest_api_request(
 
     logger.info(f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0]}... Payload keys: {list(json_payload.keys())}")
     if "generationConfig" in json_payload: logger.info(f"{log_prefix}: generationConfig in REST payload: {json_payload['generationConfig']}")
-    if "contents" in json_payload: logger.debug(f"{log_prefix}: Final Gemini 'contents' preview for API: {str(json_payload['contents'])[:500]}")
 
     return target_url, headers, json_payload

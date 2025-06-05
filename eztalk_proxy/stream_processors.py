@@ -1,7 +1,6 @@
-# eztalk_proxy/stream_processors.py
 import logging
 import orjson
-import re 
+import re
 import asyncio
 import httpx
 from typing import Dict, Any, AsyncGenerator, List, Optional
@@ -16,8 +15,8 @@ from eztalk_proxy.config import THINKING_PROCESS_SEPARATOR, MIN_FLUSH_LENGTH_HEU
 
 logger = logging.getLogger("EzTalkProxy.StreamProcessors")
 
-MIN_REASONING_FLUSH_CHUNK_SIZE = 1 # Flush reasoning as soon as it arrives
-MIN_CONTENT_FLUSH_CHUNK_SIZE = 20  # Flush content frequently
+MIN_REASONING_FLUSH_CHUNK_SIZE = 1
+MIN_CONTENT_FLUSH_CHUNK_SIZE = 20
 
 async def process_openai_like_sse_stream(
     parsed_sse_data: Dict[str, Any],
@@ -26,20 +25,19 @@ async def process_openai_like_sse_stream(
 ) -> AsyncGenerator[Dict[str, Any], None]:
     log_prefix = f"RID-{request_id}"
     
-    state = current_processing_state 
+    state = current_processing_state
     state.setdefault("accumulated_content", "")
     state.setdefault("accumulated_reasoning", "")
     state.setdefault("had_any_reasoning", False)
     state.setdefault("had_any_content", False)
     state.setdefault("reasoning_finish_event_sent", False)
     state.setdefault("final_finish_event_sent_by_llm_reason", False)
-    state.setdefault("in_think_tag_mode", False) 
+    state.setdefault("in_think_tag_mode", False)
 
     for choice in parsed_sse_data.get('choices', []):
         delta = choice.get('delta', {})
         finish_reason = choice.get("finish_reason")
 
-        # Initialize delta accumulators for this specific choice/delta
         current_reasoning_delta_from_chunk = ""
         current_content_delta_from_chunk = ""
 
@@ -49,23 +47,18 @@ async def process_openai_like_sse_stream(
         tool_calls_chunk: Optional[List[Dict[str, Any]]] = delta.get("tool_calls")
 
         if role_chunk and not reasoning_chunk_field and not content_chunk_raw and not tool_calls_chunk:
-            logger.debug(f"{log_prefix}: OpenAI-like: Role-only chunk '{role_chunk}'.")
             continue
 
-        # --- Process reasoning_content field (e.g., from official Deepseek API) ---
         if reasoning_chunk_field is not None:
             if not isinstance(reasoning_chunk_field, str): reasoning_chunk_field = str(reasoning_chunk_field)
-            current_reasoning_delta_from_chunk += reasoning_chunk_field # Accumulate to current pass delta
+            current_reasoning_delta_from_chunk += reasoning_chunk_field
             state["had_any_reasoning"] = True
-            logger.debug(f"{log_prefix}: Received from 'reasoning_content': '{reasoning_chunk_field[:50]}'")
         
-        # --- Process content field (for <think> tags or normal content) ---
         if content_chunk_raw is not None:
             if not isinstance(content_chunk_raw, str): content_chunk_raw = str(content_chunk_raw)
             
             chunk_to_process_tags = content_chunk_raw
             
-            # Only process <think> tags if 'reasoning_content' field was NOT present in this delta
             if reasoning_chunk_field is None:
                 entering_think_mode = "<think>" in chunk_to_process_tags and not state["in_think_tag_mode"]
                 exiting_think_mode = "</think>" in chunk_to_process_tags and state["in_think_tag_mode"]
@@ -78,61 +71,53 @@ async def process_openai_like_sse_stream(
                     logger.info(f"{log_prefix}: Detected <think>. Enter think_tag_mode. Remainder: '{chunk_to_process_tags[:50]}'")
                     state["had_any_reasoning"] = True
                 
-                if exiting_think_mode: # Must be after entering, can be same chunk or later
-                    # Process content before </think> as reasoning
+                if exiting_think_mode:
                     parts = chunk_to_process_tags.split("</think>", 1)
                     if parts[0]: current_reasoning_delta_from_chunk += parts[0]
                     
-                    # Flush all accumulated reasoning now and send finish
                     full_reasoning_to_flush = state["accumulated_reasoning"] + current_reasoning_delta_from_chunk
                     if full_reasoning_to_flush:
                         clean_r_text = strip_potentially_harmful_html_and_normalize_newlines(full_reasoning_to_flush)
                         if clean_r_text: yield {"type": "reasoning", "text": clean_r_text, "timestamp": get_current_time_iso()}
                     state["accumulated_reasoning"] = ""
-                    current_reasoning_delta_from_chunk = "" # Reset, it's flushed
+                    current_reasoning_delta_from_chunk = ""
                     
                     if state["had_any_reasoning"] and not state.get("reasoning_finish_event_sent"):
                         logger.info(f"{log_prefix}: Detected </think>. Sending reasoning_finish.")
                         yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                         state["reasoning_finish_event_sent"] = True
                     
-                    state["in_think_tag_mode"] = False # Exit think mode
-                    chunk_to_process_tags = parts[1] # Content after </think> is normal content
+                    state["in_think_tag_mode"] = False
+                    chunk_to_process_tags = parts[1]
                     logger.info(f"{log_prefix}: Exited think_tag_mode. Remainder for content: '{chunk_to_process_tags[:50]}'")
 
-                # Assign remaining part of chunk_to_process_tags based on mode
                 if state["in_think_tag_mode"]:
                     if chunk_to_process_tags: current_reasoning_delta_from_chunk += chunk_to_process_tags
-                else: # Not in <think> mode (or just exited)
+                else:
                     if chunk_to_process_tags: current_content_delta_from_chunk += chunk_to_process_tags
             
-            else: # reasoning_chunk_field was present, so content_chunk_raw is purely normal content
+            else:
                  if content_chunk_raw: current_content_delta_from_chunk += content_chunk_raw
         
-        # --- Accumulate deltas from this pass to the main state accumulators ---
         if current_reasoning_delta_from_chunk:
             state["accumulated_reasoning"] += current_reasoning_delta_from_chunk
-            logger.debug(f"{log_prefix}: Total accumulated reasoning: {len(state['accumulated_reasoning'])}")
         
         if current_content_delta_from_chunk:
             if state["had_any_reasoning"] and not state.get("reasoning_finish_event_sent"):
-                if state["accumulated_reasoning"]: # Flush any pending reasoning first
+                if state["accumulated_reasoning"]:
                     processed_r = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_reasoning"])
                     if processed_r: yield {"type": "reasoning", "text": processed_r, "timestamp": get_current_time_iso()}
                     state["accumulated_reasoning"] = ""
-                logger.debug(f"{log_prefix}: First actual content after reasoning. Sending reasoning_finish.")
                 yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                 state["reasoning_finish_event_sent"] = True
             state["accumulated_content"] += current_content_delta_from_chunk
             if current_content_delta_from_chunk.strip(): state["had_any_content"] = True
-            logger.debug(f"{log_prefix}: Total accumulated content: {len(state['accumulated_content'])}")
 
-        # --- More Aggressive Flushing for both Reasoning and Content ---
         if state["accumulated_reasoning"] and \
            (len(state["accumulated_reasoning"]) >= MIN_REASONING_FLUSH_CHUNK_SIZE or \
             "\n" in state["accumulated_reasoning"] or \
             finish_reason or tool_calls_chunk or \
-            (state["had_any_content"] and not state["in_think_tag_mode"])): # Content has started after <think> mode
+            (state["had_any_content"] and not state["in_think_tag_mode"])):
             
             processed_text = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_reasoning"])
             if processed_text:
@@ -157,9 +142,7 @@ async def process_openai_like_sse_stream(
                 yield {"type": "content", "text": processed_text, "timestamp": get_current_time_iso()}
             state["accumulated_content"] = ""
         
-        # --- Handle Tool Calls & Finish Reason ---
         if tool_calls_chunk or finish_reason:
-            # Final flush before tool call or finish
             if state["accumulated_reasoning"]:
                 processed_r = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_reasoning"])
                 if processed_r: yield {"type": "reasoning", "text": processed_r, "timestamp": get_current_time_iso()}
@@ -175,30 +158,27 @@ async def process_openai_like_sse_stream(
             
             if tool_calls_chunk:
                 yield {"type": "tool_calls_chunk", "data": tool_calls_chunk, "timestamp": get_current_time_iso()}
-                state["had_any_content_or_tool_call"] = True # Legacy, might be equivalent to had_any_content
+                state["had_any_content_or_tool_call"] = True
             
             if finish_reason:
                 logger.info(f"{log_prefix}: OpenAI-like choice finish_reason: {finish_reason}.")
                 yield {"type": "finish", "reason": finish_reason, "timestamp": get_current_time_iso()}
                 state["final_finish_event_sent_by_llm_reason"] = True
 
-
-# --- should_apply_custom_separator_logic, handle_stream_error, handle_stream_cleanup ---
-# (These functions remain the same as your last provided working version)
 def should_apply_custom_separator_logic(
     request_data: ChatRequestModel,
     request_id: str,
-    is_google_like_path: bool, 
-    is_native_thinking_active: bool 
+    is_google_like_path: bool,
+    is_native_thinking_active: bool
 ) -> bool:
     log_prefix = f"RID-{request_id}"
     if request_data.force_custom_reasoning_prompt:
         logger.info(f"{log_prefix}: Custom separator logic FORCED by request.")
         return True
-    if is_google_like_path and is_native_thinking_active: 
+    if is_google_like_path and is_native_thinking_active:
         logger.info(f"{log_prefix}: Custom separator logic OFF (Google native thinking via part.thought active).")
         return False
-    if "deepseek" in request_data.model.lower() or request_data.provider.lower() == "mke": # Check provider as well
+    if "deepseek" in request_data.model.lower() or request_data.provider.lower() == "mke":
         logger.info(f"{log_prefix}: Custom separator logic OFF for Deepseek/MKE (using reasoning_content or <think> tags).")
         return False
     logger.info(f"{log_prefix}: Custom separator logic OFF by default for model '{request_data.model}'.")
@@ -223,10 +203,9 @@ async def handle_stream_cleanup(
     upstream_ok: bool, use_old_custom_separator_logic: bool, provider: str
 ) -> AsyncGenerator[bytes, None]:
     log_prefix = f"RID-{request_id}"
-    state = processing_state 
+    state = processing_state
     logger.info(f"{log_prefix}: Stream cleanup. Provider: {provider}. Upstream OK: {upstream_ok}. CustomSep: {use_old_custom_separator_logic}")
 
-    # Use generic keys for accumulated content/reasoning if you unified them in state
     accumulated_reasoning = state.get("accumulated_reasoning", state.get("accumulated_openai_reasoning", ""))
     accumulated_content = state.get("accumulated_content", state.get("accumulated_openai_content", ""))
     had_any_reasoning = state.get("had_any_reasoning", state.get("openai_had_any_reasoning", False))
@@ -250,7 +229,7 @@ async def handle_stream_cleanup(
             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=processed_c, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
     
     if use_old_custom_separator_logic and state.get("accumulated_text_custom","").strip() and upstream_ok:
-        pass # Your custom separator logic here
+        pass
 
     if not upstream_ok and not state.get("final_finish_event_sent_by_llm_reason") and not state.get("final_finish_event_sent_flag_for_cleanup", False):
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason="upstream_error_or_connection_failed", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))

@@ -1,4 +1,3 @@
-# eztalk_proxy/web_search.py
 import asyncio
 import logging
 import orjson
@@ -13,7 +12,7 @@ logger = logging.getLogger("EzTalkProxy.WebSearch")
 
 async def perform_web_search(query: str, rid: str) -> List[Dict[str, str]]:
     results = []
-    actual_google_api_key = GOOGLE_API_KEY_ENV 
+    actual_google_api_key = GOOGLE_API_KEY_ENV
     if not actual_google_api_key or not GOOGLE_CSE_ID:
         logger.warning(f"RID-{rid}: Web search skipped, GOOGLE_API_KEY_ENV or GOOGLE_CSE_ID not set.")
         return results
@@ -35,7 +34,7 @@ async def perform_web_search(query: str, rid: str) -> List[Dict[str, str]]:
             if len(snippet) > SEARCH_SNIPPET_MAX_LENGTH:
                 snippet = snippet[:SEARCH_SNIPPET_MAX_LENGTH] + "..."
             results.append({
-                "index": i + 1, # 保留 index 字段，因为前端可能仍然用它来显示来源列表
+                "index": i + 1,
                 "title": item.get('title', 'N/A').strip(),
                 "href": item.get('link', 'N/A'),
                 "snippet": snippet
@@ -50,22 +49,19 @@ async def perform_web_search(query: str, rid: str) -> List[Dict[str, str]]:
         try:
             content_json = orjson.loads(e.content)
             err_detail = content_json.get("error", {})
-            err_message = err_detail.get("message", str(e.content)) 
+            err_message = err_detail.get("message", str(e.content))
             err_content = f"{err_message} (Code: {err_detail.get('code', 'N/A')}, Status: {err_detail.get('status', 'N/A')})"
-        except: 
+        except:
             err_content = e._get_reason() if hasattr(e, '_get_reason') else e.content.decode(errors='ignore')[:200]
         logger.error(f"RID-{rid}: Google Web Search HttpError (Status: {status_code}): {err_content}")
     except Exception as search_exc:
         logger.error(f"RID-{rid}: Google Web Search failed for query '{query[:50]}': {search_exc}", exc_info=True)
     return results
 
-# --- 修改后的函数 ---
 def generate_search_context_message_content(query: str, search_results: List[Dict[str, str]]) -> str:
     if not search_results:
         return ""
     
-    # 构建提示，指导AI如何使用信息但不要在文本中插入引用标记
-    # 开头指令，更明确
     prompt_parts = [
         f"You have been provided with the following web search results for the user's query: '{query}'. "
         "Your task is to synthesize this information, along with your general knowledge, to construct a comprehensive and natural-sounding answer. "
@@ -73,23 +69,19 @@ def generate_search_context_message_content(query: str, search_results: List[Dic
         "The user will have a separate way to view the sources if they wish."
     ]
 
-    # 列出搜索结果的详细信息，供AI参考
     for i, res in enumerate(search_results):
-        # 使用 "Source {number}" 格式，如果AI还是倾向于模仿，可以考虑更抽象的表达
-        # 这里的 'index' 字段来自 perform_web_search，我们用 i+1 来确保是从1开始的连续编号
-        source_identifier = res.get('index', i + 1) # 优先使用结果中的 index，否则用 enumerate 的 i+1
+        source_identifier = res.get('index', i + 1)
         prompt_parts.append(
-            f"\nSource {source_identifier}:\n" 
+            f"\nSource {source_identifier}:\n"
             f"  Title: {res.get('title', 'N/A')}\n"
             f"  Snippet: {res.get('snippet', 'N/A')}\n"
             f"  URL: {res.get('href', 'N/A')} (This URL is for your reference only and should not be included in the response)"
         )
     
-    # 结尾的总结性指令
     prompt_parts.append(
         "\n\nBased on the information from these sources and your existing knowledge, please formulate your answer. "
         "Focus on delivering a clear, accurate, and well-integrated response to the user's query. "
         "Remember, do not insert any citation markers (e.g., [1], [Source 2]) into the body of your answer."
     )
     
-    return "\n\n".join(prompt_parts) # 使用双换行符增加可读性
+    return "\n\n".join(prompt_parts)

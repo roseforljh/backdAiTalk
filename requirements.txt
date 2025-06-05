@@ -1,34 +1,20 @@
-# FastAPI & Uvicorn
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 
-# HTTP Client
 httpx[http2]>=0.25.0
 
-# JSON processing
 orjson>=3.8.0
 
-# Google AI Related (保持你现有的，根据实际使用情况调整)
-# 如果你主要通过 REST API 与 Gemini 交互 (如 multimodal_chat.py 所示)，
-# 那么 google-cloud-aiplatform 和 google-auth 可能不是直接必需的，
-# 除非你项目其他地方用到了 Vertex AI SDK。
-# google-generativeai 是用于 Google AI Studio / Gemini API (非Vertex) 的 SDK。
-# 请根据你的实际 API 调用方式保留或调整。
-google-cloud-aiplatform>=1.45.0  # 如果使用 Vertex AI SDK
-google-auth>=2.20.0              # 通常作为 google-cloud-* 的依赖
-google-api-python-client         # 如果项目中其他地方用到
-google-generativeai>=0.5.0       # 如果直接调用 Google AI Gemini API (非Vertex)
+google-cloud-aiplatform>=1.45.0
+google-auth>=2.20.0
+google-api-python-client
+google-generativeai>=0.5.0
 
-# Pydantic
 pydantic>=2.0.0
 
-# Environment variables
 python-dotenv>=1.0.0
 
-# FastAPI File Uploads (Multipart)
-python-multipart>=0.0.9 # <--- 确保这个存在并且版本较新
+python-multipart>=0.0.9
 
-# Document Processing Libraries
-PyPDF2>=3.0.0             # 用于 PDF 文件文本提取 (或者 pdfminer.six)
-python-docx>=1.1.0        # 用于 DOCX 文件文本提取
-
+PyPDF2>=3.0.0
+python-docx>=1.1.0
