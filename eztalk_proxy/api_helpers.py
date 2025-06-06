@@ -51,7 +51,8 @@ def prepare_openai_request(
     system_message_found_and_updated = False
 
     # Determine which formatting instruction to use based on the model name.
-    instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION if "deepseek" in request_data.model.lower() else KATEX_FORMATTING_INSTRUCTION
+    model_name_lower = request_data.model.lower()
+    instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION if "deepseek" in model_name_lower or "qwen" in model_name_lower else KATEX_FORMATTING_INSTRUCTION
 
     # Inject the appropriate instruction into the system message.
     for m_dict in processed_messages:
