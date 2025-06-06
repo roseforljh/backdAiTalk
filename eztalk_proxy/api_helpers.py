@@ -6,6 +6,7 @@ from eztalk_proxy.models import ChatRequestModel, SimpleTextApiMessagePy
 from eztalk_proxy.config import DEFAULT_OPENAI_API_BASE_URL, OPENAI_COMPATIBLE_PATH
 from eztalk_proxy.katex_prompt import KATEX_FORMATTING_INSTRUCTION
 from eztalk_proxy.deepseek_katex_prompt import DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
+from eztalk_proxy.qwen_katex_prompt import QWEN_KATEX_FORMATTING_INSTRUCTION
 from eztalk_proxy.utils import is_gemini_2_5_model
 
 def prepare_openai_request(
@@ -24,8 +25,13 @@ def prepare_openai_request(
 
     final_messages = list(processed_messages)
     model_name_lower = request_data.model.lower()
-    use_deepseek_prompt = "deepseek" in model_name_lower or "qwen" in model_name_lower
-    instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION if use_deepseek_prompt else KATEX_FORMATTING_INSTRUCTION
+    instruction = ""
+    if "qwen" in model_name_lower:
+        instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
+    elif "deepseek" in model_name_lower:
+        instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
+    else:
+        instruction = KATEX_FORMATTING_INSTRUCTION
 
     system_message_index = -1
     for i, msg in enumerate(final_messages):

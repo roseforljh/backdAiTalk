@@ -13,8 +13,6 @@ from eztalk_proxy.multimodal_models import (
 )
 from eztalk_proxy.config import GOOGLE_API_BASE_URL
 from eztalk_proxy.utils import is_gemini_2_5_model
-from eztalk_proxy.deepseek_katex_prompt import DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
-from eztalk_proxy.qwen_katex_prompt import QWEN_KATEX_FORMATTING_INSTRUCTION
 
 logger = logging.getLogger("EzTalkProxy.MultimodalAPIHelpers")
 
@@ -177,18 +175,6 @@ def prepare_gemini_rest_api_request(
                     if "generationConfig" not in json_payload:
                         json_payload["generationConfig"] = {}
                     json_payload["generationConfig"]["toolConfig"] = {"functionCallingConfig": tool_config_payload}
-
-    system_instruction = None
-    model_name_lower = model_name.lower()
-    if "qwen" in model_name_lower:
-        system_instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
-        logger.info(f"{log_prefix}: Applying Qwen-specific KaTeX formatting instructions.")
-    elif "deepseek" in model_name_lower:
-        system_instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
-        logger.info(f"{log_prefix}: Applying DeepSeek-specific KaTeX formatting instructions.")
-
-    if system_instruction:
-        json_payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
     logger.info(f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0]}... Payload keys: {list(json_payload.keys())}")
     if "generationConfig" in json_payload: logger.info(f"{log_prefix}: generationConfig in REST payload: {json_payload['generationConfig']}")
