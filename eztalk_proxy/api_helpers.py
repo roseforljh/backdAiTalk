@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Union, Tuple
 from eztalk_proxy.models import ChatRequestModel, SimpleTextApiMessagePy
 from eztalk_proxy.config import DEFAULT_OPENAI_API_BASE_URL, OPENAI_COMPATIBLE_PATH
 from eztalk_proxy.katex_prompt import KATEX_FORMATTING_INSTRUCTION
+from eztalk_proxy.deepseek_katex_prompt import DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
 from eztalk_proxy.utils import is_gemini_2_5_model
 
 logger = logging.getLogger("EzTalkProxy.APIHelpers")
@@ -48,29 +49,26 @@ def prepare_openai_request(
 
     final_openai_payload_msgs = []
     system_message_found_and_updated = False
+
+    # Determine which formatting instruction to use based on the model name.
+    instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION if "deepseek" in request_data.model.lower() else KATEX_FORMATTING_INSTRUCTION
+
+    # Inject the appropriate instruction into the system message.
     for m_dict in processed_messages:
         current_msg_payload = m_dict.copy()
-
         if current_msg_payload.get("role") == "system":
             original_content = current_msg_payload.get("content", "")
             if isinstance(original_content, str):
-                final_system_content = original_content
-                if KATEX_FORMATTING_INSTRUCTION not in final_system_content:
-                    final_system_content = (final_system_content + "\n\n" + KATEX_FORMATTING_INSTRUCTION).strip()
-                current_msg_payload["content"] = final_system_content
+                if instruction not in original_content:
+                    current_msg_payload["content"] = (original_content + "\n\n" + instruction).strip()
             else:
                 logger.warning(f"{log_prefix}: System message content is not a string, KaTeX not injected. Content: {original_content}")
-            
-            final_openai_payload_msgs.append(current_msg_payload)
             system_message_found_and_updated = True
-        elif current_msg_payload.get("role") == "user" and isinstance(current_msg_payload.get("content"), list):
-            final_openai_payload_msgs.append(current_msg_payload)
-        else:
-            final_openai_payload_msgs.append(current_msg_payload)
+        final_openai_payload_msgs.append(current_msg_payload)
 
     if not system_message_found_and_updated:
-        final_openai_payload_msgs.insert(0, {"role": "system", "content": KATEX_FORMATTING_INSTRUCTION})
-        logger.info(f"{log_prefix}: OpenAI Req: No system message found, prepended KaTeX instruction.")
+        final_openai_payload_msgs.insert(0, {"role": "system", "content": instruction})
+        logger.info(f"{log_prefix}: OpenAI Req: No system message found, prepended KaTeX instruction for model {request_data.model}.")
     
     payload: Dict[str, Any] = {
         "model": request_data.model,
@@ -178,13 +176,14 @@ def prepare_google_request_payload_structure(
 
         if m_obj.role == "system" and m_obj.content and m_obj.content.strip():
             has_client_system_message = True
+            # For Google models, we use the general prompt as they follow instructions well.
             system_content_with_katex = f"{m_obj.content.strip()}\n\n{KATEX_FORMATTING_INSTRUCTION}"
             system_instruction_parts.append(system_content_with_katex)
         else:
             user_facing_messages_simple.append(m_obj)
 
     if not has_client_system_message:
-        if not any(part.lower().strip() == KATEX_FORMATTING_INSTRUCTION.lower().strip() for part in system_instruction_parts):
+        if not any(KATEX_FORMATTING_INSTRUCTION in part for part in system_instruction_parts):
             system_instruction_parts.append(KATEX_FORMATTING_INSTRUCTION)
     
     final_system_instruction_content = "\n\n".join(system_instruction_parts).strip() if system_instruction_parts else None
