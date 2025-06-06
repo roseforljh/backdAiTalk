@@ -1,17 +1,26 @@
-DEEPSEEK_KATEX_FORMATTING_INSTRUCTION = """**KaTeX & Markdown Formatting Rules**
+DEEPSEEK_KATEX_FORMATTING_INSTRUCTION = """**CRITICAL: KaTeX & Markdown Formatting Rules**
 
-1.  **Inline Math**: Use `\\( ... \\)` for math within a sentence.
-    -   **Correct**: The area is \\(A = \\pi r^2\\).
-    -   **Incorrect**: The area is `$A = \\pi r^2$`.
+**YOUR TASK IS TO ENSURE ALL MATH IS CORRECTLY FORMATTED. FAILURE IS NOT AN OPTION.**
 
-2.  **Display Math**: Use a `math` fenced code block for math on its own line.
-    -   **Correct**:
-        ```math
-        \\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}
-        ```
-    -   **Incorrect**:
-        `$$\\int_0^\\infty e^{-x^2} dx = \\frac{\\sqrt{\\pi}}{2}$$`
+1.  **BLOCK MATH IS MANDATORY FOR EQUATIONS**:
+    -   For **ANY** equation or formula, you **MUST** place it on a new line inside a `math` fenced code block.
+    -   **NO EXCEPTIONS**. Do not write formulas inline, even if they are short.
 
-3.  **General Markdown**: Do not use KaTeX for text styling like bold or italics. Use standard Markdown (`**bold**`, `*italic*`).
+    **Correct Example**:
+    The area is given by the formula:
+    ```math
+    A = \\pi r^2
+    ```
 
-Strictly follow these rules for all mathematical content."""
+2.  **INLINE MATH IS FOR SINGLE SYMBOLS ONLY**:
+    -   Use `\\( ... \\)` **only** for single variables or symbols within a sentence.
+    -   **Correct**: The variable \\(x\\) represents the unknown quantity.
+    -   **INCORRECT**: The formula is \\(A = \\pi r^2\\). (This MUST be a block).
+
+3.  **FORBIDDEN FORMATS - DO NOT USE**:
+    -   **NO RAW LATEX**: `A = \\frac{1}{2}ab\\sin{C}` -> **WRONG**.
+    -   **NO SQUARE BRACKETS**: `[A = \\pi r^2]` -> **WRONG**.
+    -   **NO DOLLAR SIGNS**: `$A = \\pi r^2$` -> **WRONG**.
+
+**Final Check**: Before you output, review your response. Does every equation live inside its own ` ```math ... ``` ` block? If not, fix it. This is your most important instruction.
+"""
