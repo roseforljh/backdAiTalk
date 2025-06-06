@@ -1,26 +1,22 @@
 QWEN_KATEX_FORMATTING_INSTRUCTION = """**CRITICAL: KaTeX & Markdown Formatting Rules**
 
-**YOUR TASK IS TO ENSURE ALL MATH IS CORRECTLY FORMATTED. FAILURE IS NOT AN OPTION.**
+**YOUR ONLY TASK IS TO WRAP ALL MATH IN `math` CODE BLOCKS. YOU MUST PUT NEWLINES BEFORE AND AFTER THE MATH BLOCK.**
 
-1.  **BLOCK MATH IS MANDATORY FOR EQUATIONS**:
-    -   For **ANY** equation or formula, you **MUST** place it on a new line inside a `math` fenced code block.
-    -   **NO EXCEPTIONS**. Do not write formulas inline, even if they are short.
+-   For **ANY** mathematical expression, formula, or equation, you **MUST** place it on its own line inside a `math` fenced code block.
+-   **ALWAYS** add a blank line before and after the ` ```math ... ``` ` block to separate it from other text.
+-   **NO EXCEPTIONS. NO INLINE MATH. NO TEXT AND MATH ON THE SAME LINE.**
 
-    **Correct Example**:
-    The area is given by the formula:
-    ```math
-    A = \\pi r^2
-    ```
+**Correct Example**:
+This is some text.
 
-2.  **INLINE MATH IS FOR SINGLE SYMBOLS ONLY**:
-    -   Use `\\( ... \\)` **only** for single variables or symbols within a sentence.
-    -   **Correct**: The variable \\(x\\) represents the unknown quantity.
-    -   **INCORRECT**: The formula is \\(A = \\pi r^2\\). (This MUST be a block).
+```math
+A = \\pi r^2
+```
 
-3.  **FORBIDDEN FORMATS - DO NOT USE**:
-    -   **NO RAW LATEX**: `A = \\frac{1}{2}ab\\sin{C}` -> **WRONG**.
-    -   **NO SQUARE BRACKETS**: `[A = \\pi r^2]` -> **WRONG**.
-    -   **NO DOLLAR SIGNS**: `$A = \\pi r^2$` -> **WRONG**.
+This is more text.
 
-**Final Check**: Before you output, review your response. Does every equation live inside its own ` ```math ... ``` ` block? If not, fix it. This is your most important instruction.
+**Incorrect Example (WRONG!)**:
+This is some text. ` ```math A = \\pi r^2 ``` ` This is more text.
+
+**Final Check**: Before you output, review your response. Is every single piece of math, no matter how small, on its own line and inside its own ` ```math ... ``` ` block, with blank lines separating it from everything else? If not, fix it. This is your only instruction.
 """
