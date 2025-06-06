@@ -1,4 +1,4 @@
-DEEPSEEK_KATEX_FORMATTING_INSTRUCTION = """**CRITICAL INSTRUCTION: OUTPUT ONLY RAW TEXT AND RAW LATEX.**
+QWEN_KATEX_FORMATTING_INSTRUCTION = """**CRITICAL INSTRUCTION: OUTPUT ONLY RAW TEXT AND RAW LATEX.**
 
 -   **DO NOT** use any Markdown formatting like ` ```math ... ``` ` or `\\( ... \\)`.
 -   **DO NOT** use `**bold**` or `*italics*`.
