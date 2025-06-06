@@ -33,7 +33,7 @@ try:
     import PyPDF2
 except ImportError:
     PyPDF2 = None
-    logging.warning("PyPDF2 library not found. PDF text extraction will not be available.")
+    logging.warning("1PyPDF2 library not found. PDF text extraction will not be available.")
 
 try:
     import docx
