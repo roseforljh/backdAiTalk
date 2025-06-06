@@ -128,7 +128,7 @@ if __name__ == "__main__":
     APP_HOST = os.getenv("HOST", "0.0.0.0")
     APP_PORT = int(os.getenv("PORT", 7860))
     
-    logger.info(f"准备启动 Uvicorn 服务器: http://{APP_HOST}:{APP_PORT}")
+    logger.info(f"1准备启动 Uvicorn 服务器: http://{APP_HOST}:{APP_PORT}")
     logger.info(f"应用日志级别 (EzTalkProxy.*): {LOG_LEVEL_FROM_ENV}")
     
     uvicorn.run(
