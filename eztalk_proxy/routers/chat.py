@@ -321,10 +321,13 @@ async def generate_non_gemini_events(
 
     if request_data.use_web_search and user_query_for_search:
         logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search initiated for query: '{user_query_for_search[:100]}'")
-        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_search_started", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_indexing_started", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
         
         search_results_list = await perform_web_search(user_query_for_search, request_id)
         
+        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_analysis_started", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+        await asyncio.sleep(0.05)
+
         if search_results_list:
             search_context_content = generate_search_context_message_content(user_query_for_search, search_results_list)
             new_system_message_dict = {"role": "system", "content": search_context_content}
@@ -341,11 +344,11 @@ async def generate_non_gemini_events(
             
             search_results_generated_this_time = True
             logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search context injected.")
-            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_search_complete_with_results", query=user_query_for_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_analysis_complete", query=user_query_for_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="web_search_results", results=search_results_list, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
         else:
             logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search yielded no results for query '{user_query_for_search[:100]}'.")
-            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_search_complete_no_results", query=user_query_for_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_analysis_complete", query=user_query_for_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
         
     try:
         current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
