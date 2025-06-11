@@ -349,7 +349,9 @@ async def generate_non_gemini_events(
         else:
             logger.info(f"{log_prefix}: (Non-Gemini-REST) Web search yielded no results for query '{user_query_for_search[:100]}'.")
             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="web_analysis_complete", query=user_query_for_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
-        
+    else:
+        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="llm_connecting", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+
     try:
         current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
             request_data=request_data,
@@ -415,6 +417,11 @@ async def generate_non_gemini_events(
                 return
 
             upstream_ok_flag = True
+            
+            if not request_data.use_web_search:
+                yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="llm_connected", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+                yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="llm_analyzing", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+
             async for raw_chunk_bytes in response.aiter_raw():
                 if await fastapi_request_obj.is_disconnected():
                     logger.info(f"{log_prefix}: (Non-Gemini-REST) Client disconnected.")
@@ -424,6 +431,8 @@ async def generate_non_gemini_events(
                     if request_data.use_web_search and user_query_for_search:
                         stage_after_search = "web_analysis_complete" if search_results_generated_this_time else "web_analysis_skipped_no_results"
                         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage=stage_after_search, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+                    elif not request_data.use_web_search:
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="llm_analysis_complete", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
                     first_chunk_llm_received = True
                 
                 buffer.extend(raw_chunk_bytes)
