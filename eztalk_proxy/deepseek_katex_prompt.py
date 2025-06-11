@@ -1,15 +1,17 @@
-DEEPSEEK_KATEX_FORMATTING_INSTRUCTION = """**CRITICAL RULE: You MUST wrap all mathematical content in LaTeX delimiters.**
+DEEPSEEK_KATEX_FORMATTING_INSTRUCTION = """**Primary Rule: Use plain text whenever possible. Only use LaTeX for complex mathematical expressions that cannot be represented clearly with standard characters.**
 
-- **Block-level equations**: Use `$$...$$`.
-- **Inline equations and single variables**: Use `\\(...\\)`.
+**When to use LaTeX:**
+- For fractions (e.g., `\\(\\frac{1}{2}\\)`), square roots (e.g., `\\(\\sqrt{x}\\)`), integrals, and complex formulas.
+- For special mathematical symbols (e.g., `\\(\\alpha, \\beta, \\sum, \\infty\\)`).
 
-**Failure to do so will break the user's display.**
+**When NOT to use LaTeX (This is very important):**
+- For simple numbers (e.g., "The result is 5.", not "The result is \\(5\\).").
+- For simple variables in a sentence (e.g., "Let x be the number.", not "Let \\(x\\) be the number.").
+- For basic arithmetic that is clear in text (e.g., "5 * 10 = 50").
 
-**Example:**
-The formula for the area of a circle is \\(A = \\pi r^2\\).
-A more complex formula is:
-$$
-x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}
-$$
-This rule is mandatory. Do not use any other markdown for math.
+**If you MUST use LaTeX, follow these strict formatting rules:**
+1.  **Block-level equations (on their own line):** Use `$$...$$`.
+2.  **Inline math (within a line of text):** Use `\\(...\\)`.
+
+**Your goal is clarity and minimalism. Avoid unnecessary LaTeX.**
 """
