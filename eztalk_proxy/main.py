@@ -1,6 +1,7 @@
 import os
 import logging
 import httpx
+import httpcore
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -34,11 +35,37 @@ async def lifespan(app_instance: FastAPI):
     logger.info("Lifespan: 应用启动，开始初始化...")
     client_local: Optional[httpx.AsyncClient] = None
     try:
+        transport = httpx.AsyncHTTPTransport(
+            retries=2,
+            http2=True,
+            limits=httpx.Limits(max_connections=MAX_CONNECTIONS),
+            verify=True,
+            cert=None,
+            trust_env=False,
+            proxy=None,
+            uds=None,
+            local_address=None,
+            http1=True,
+            backend=httpcore.AsyncHTTP11(
+                retries=2,
+                local_address=None,
+                uds=None,
+                network_backend=httpcore.AsyncSocket(
+                    connect_timeout=API_TIMEOUT,
+                    read_timeout=READ_TIMEOUT,
+                    write_timeout=API_TIMEOUT,
+                    ssl_context=None,
+                    server_hostname=None,
+                    tls_standard_compatible=True
+                )
+            )
+        )
         client_local = httpx.AsyncClient(
             timeout=httpx.Timeout(API_TIMEOUT, read=READ_TIMEOUT),
             limits=httpx.Limits(max_connections=MAX_CONNECTIONS),
             http2=True,
             follow_redirects=True,
+            transport=transport,
             trust_env=False
         )
         app_instance.state.http_client = client_local
