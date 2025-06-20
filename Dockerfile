@@ -16,4 +16,4 @@ COPY . ${APP_HOME}/
 
 WORKDIR ${APP_HOME}
 
-CMD ["uvicorn", "eztalk\_proxy.main:app", "--host", "0.0.0.0", "--port", "8880"]
+CMD ["uvicorn", "eztalk\_proxy.main:app", "--host", "0.0.0.0", "--port", "2052"]
