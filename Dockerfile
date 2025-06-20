@@ -1,19 +1,19 @@
-FROM python:3.9-slim
+FROM python:3.9-slim-buster
 
 ENV PYTHONUNBUFFERED 1
 ENV APP_HOME /app
-ENV TEMP_UPLOAD_DIR_NAME temp_document_uploads 
-WORKDIR ${APP_HOME}
+ENV TEMP_UPLOAD_DIR name temp_document_uploads
 
-RUN mkdir -p ${APP_HOME}/${TEMP_UPLOAD_DIR_NAME}
+
+RUN mkdir -p ${APP_HOME}/temp_document_uploads
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip 
+RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ./eztalk_proxy ${APP_HOME}/eztalk_proxy
+COPY . ${APP_HOME}/ 
 
-ENV PORT 7860
-EXPOSE ${PORT}
 
-CMD /bin/sh -c "uvicorn eztalk_proxy.main:app --host 0.0.0.0 --port ${PORT}"
+WORKDIR ${APP_HOME}
+
+CMD ["uvicorn", "eztalk\_proxy.main:app", "--host", "0.0.0.0", "--port", "8880"]
