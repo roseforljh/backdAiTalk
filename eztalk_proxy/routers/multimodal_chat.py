@@ -137,10 +137,7 @@ async def generate_gemini_rest_api_events_with_docs(
             except Exception as e_file_proc:
                 logger.error(f"{log_prefix}: Error processing file '{filename}' for Gemini: {e_file_proc}", exc_info=True)
             finally:
-                try:
-                    await uploaded_file.close()
-                except Exception as e_close:
-                    logger.warning(f"{log_prefix}: Error closing uploaded file '{filename}': {e_close}")
+                pass
     
     if additional_extracted_text:
         logger.info(f"{log_prefix}: Adding additionally extracted text (len: {len(additional_extracted_text)}) as a text part for Gemini.")
