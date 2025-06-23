@@ -23,7 +23,7 @@ if __name__ == "__main__":
     logging.info(f"Log Level: {LOG_LEVEL_FROM_ENV}")
     
     uvicorn.run(
-        "backdAiTalk.eztalk_proxy.main:app",
+        "eztalk_proxy.main:app",
         host=APP_HOST,
         port=APP_PORT,
         log_level=LOG_LEVEL_FROM_ENV.lower(),
