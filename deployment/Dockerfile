@@ -7,13 +7,13 @@ ENV TEMP_UPLOAD_DIR name temp_document_uploads
 
 RUN mkdir -p ${APP_HOME}/temp_document_uploads
 
-COPY requirements.txt .
+COPY ../requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . ${APP_HOME}/ 
+COPY ../ ${APP_HOME}/
 
 
 WORKDIR ${APP_HOME}
 
-CMD ["uvicorn", "eztalk\_proxy.main:app", "--host", "0.0.0.0", "--port", "2052"]
+CMD ["uvicorn", "eztalk_proxy.main:app", "--host", "0.0.0.0", "--port", "2052"]

@@ -38,3 +38,9 @@ For example, to solve \\(x^2 - 5x + 6 = 0\\), we have a=1, b=-5, and c=6. The so
 
 Your goal is absolute precision and minimalism. Failure to comply with these directives will result in a failed output.
 """
+
+# For backward compatibility or if specific tweaks are ever needed,
+# we assign it to the old constant name.
+KATEX_FORMATTING_INSTRUCTION = ULTRA_STRICT_KATEX_PROMPT
+DEEPSEEK_KATEX_FORMATTING_INSTRUCTION = ULTRA_STRICT_KATEX_PROMPT
+QWEN_KATEX_FORMATTING_INSTRUCTION = ULTRA_STRICT_KATEX_PROMPT

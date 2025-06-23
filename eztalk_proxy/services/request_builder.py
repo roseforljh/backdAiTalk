@@ -1,20 +1,100 @@
+import orjson
 import logging
 from typing import List, Dict, Any, Optional, Union, Tuple
+from urllib.parse import urljoin
 
-from eztalk_proxy.models import (
+from ..models.api_models import (
     ChatRequestModel,
+    SimpleTextApiMessagePy,
     PartsApiMessagePy,
-    SimpleTextApiMessagePy
-)
-from eztalk_proxy.multimodal_models import (
     PyTextContentPart,
     PyFileUriContentPart,
     PyInlineDataContentPart
 )
-from eztalk_proxy.config import GOOGLE_API_BASE_URL
-from eztalk_proxy.utils import is_gemini_2_5_model
+from ..core.config import (
+    DEFAULT_OPENAI_API_BASE_URL,
+    OPENAI_COMPATIBLE_PATH,
+    GOOGLE_API_BASE_URL
+)
+# Assuming prompts will be moved and consolidated
+from ..prompts.katex import KATEX_FORMATTING_INSTRUCTION, DEEPSEEK_KATEX_FORMATTING_INSTRUCTION, QWEN_KATEX_FORMATTING_INSTRUCTION
+from ..utils.helpers import is_gemini_2_5_model
 
-logger = logging.getLogger("EzTalkProxy.MultimodalAPIHelpers")
+logger = logging.getLogger("EzTalkProxy.Services.RequestBuilder")
+
+def prepare_openai_request(
+    request_data: ChatRequestModel,
+    processed_messages: List[Dict[str, Any]],
+    request_id: str
+) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
+    base_url = (request_data.api_address or DEFAULT_OPENAI_API_BASE_URL).strip().rstrip('/')
+    target_url = urljoin(f"{base_url}/", OPENAI_COMPATIBLE_PATH.lstrip('/'))
+
+    headers = {
+        "Authorization": f"Bearer {request_data.api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+    }
+
+    final_messages = list(processed_messages)
+    model_name_lower = request_data.model.lower()
+    instruction = ""
+    if "qwen" in model_name_lower:
+        instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
+    elif "deepseek" in model_name_lower:
+        instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
+    else:
+        instruction = KATEX_FORMATTING_INSTRUCTION
+
+    system_message_index = -1
+    for i, msg in enumerate(final_messages):
+        if msg.get("role") == "system":
+            system_message_index = i
+            break
+    
+    if system_message_index != -1:
+        content = final_messages[system_message_index].get("content", "")
+        if isinstance(content, str) and instruction not in content:
+            final_messages[system_message_index]["content"] = f"{content}\n\n{instruction}".strip()
+    else:
+        final_messages.insert(0, {"role": "system", "content": instruction})
+
+    payload: Dict[str, Any] = {
+        "model": request_data.model,
+        "messages": final_messages,
+        "stream": True,
+    }
+
+    gen_conf = request_data.generation_config
+    if gen_conf:
+        payload.update({
+            "temperature": gen_conf.temperature,
+            "top_p": gen_conf.top_p,
+            "max_tokens": gen_conf.max_output_tokens,
+        })
+
+    payload.update({
+        "temperature": payload.get("temperature") or request_data.temperature,
+        "top_p": payload.get("top_p") or request_data.top_p,
+        "max_tokens": payload.get("max_tokens") or request_data.max_tokens,
+        "tools": request_data.tools,
+        "tool_choice": request_data.tool_choice,
+    })
+    
+    payload = {k: v for k, v in payload.items() if v is not None}
+
+    if "qwen" in model_name_lower and isinstance(request_data.qwen_enable_search, bool):
+        payload["enable_search"] = request_data.qwen_enable_search
+
+    if request_data.custom_model_parameters:
+        for key, value in request_data.custom_model_parameters.items():
+            if key not in payload:
+                payload[key] = value
+    
+    if request_data.custom_extra_body:
+        payload.update(request_data.custom_extra_body)
+        
+    return target_url, headers, payload
 
 def convert_parts_messages_to_rest_api_contents(
     messages: List[PartsApiMessagePy],

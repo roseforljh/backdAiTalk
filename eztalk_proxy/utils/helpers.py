@@ -10,7 +10,7 @@ import uuid
 from fastapi.responses import JSONResponse
 from fastapi import UploadFile
 
-from .config import (
+from ..core.config import (
     COMMON_HEADERS,
     MAX_SSE_LINE_LENGTH,
     TEMP_UPLOAD_DIR,

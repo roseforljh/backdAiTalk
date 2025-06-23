@@ -5,13 +5,13 @@ import asyncio
 import httpx
 from typing import Dict, Any, AsyncGenerator, List, Optional
 
-from eztalk_proxy.models import AppStreamEventPy, ChatRequestModel
-from eztalk_proxy.utils import (
+from ..models.api_models import AppStreamEventPy, ChatRequestModel
+from ..utils.helpers import (
     get_current_time_iso,
     orjson_dumps_bytes_wrapper,
     strip_potentially_harmful_html_and_normalize_newlines
 )
-from eztalk_proxy.config import THINKING_PROCESS_SEPARATOR, MIN_FLUSH_LENGTH_HEURISTIC
+from ..core.config import THINKING_PROCESS_SEPARATOR, MIN_FLUSH_LENGTH_HEURISTIC
 
 logger = logging.getLogger("EzTalkProxy.StreamProcessors")
 

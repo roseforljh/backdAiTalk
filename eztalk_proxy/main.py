@@ -6,12 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from .config import (
+from .core.config import (
     APP_VERSION, API_TIMEOUT, READ_TIMEOUT, MAX_CONNECTIONS,
     LOG_LEVEL_FROM_ENV,
     TEMP_UPLOAD_DIR
 )
-from .routers import chat as chat_router
+from .api import chat as chat_router
 
 numeric_log_level = getattr(logging, LOG_LEVEL_FROM_ENV.upper(), logging.INFO)
 logging.basicConfig(
@@ -122,19 +122,4 @@ async def health_check(request: Request):
     return response_data
 
 
-if __name__ == "__main__":
-    import uvicorn
-
-    APP_HOST = os.getenv("HOST", "0.0.0.0")
-    APP_PORT = int(os.getenv("PORT", 7860))
-    
-    logger.info(f"1准备启动 Uvicorn 服务器: http://{APP_HOST}:{APP_PORT}")
-    logger.info(f"应用日志级别 (EzTalkProxy.*): {LOG_LEVEL_FROM_ENV}")
-    
-    uvicorn.run(
-        "eztalk_proxy.main:app",
-        host=APP_HOST,
-        port=APP_PORT,
-        log_level=LOG_LEVEL_FROM_ENV.lower(),
-        reload=os.getenv("DEV_RELOAD", "false").lower() == "true"
-    )
+# This block is now handled by the top-level run.py script

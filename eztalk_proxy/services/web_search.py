@@ -6,7 +6,7 @@ from typing import List, Dict
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from .config import GOOGLE_API_KEY_ENV, GOOGLE_CSE_ID, SEARCH_RESULT_COUNT, SEARCH_SNIPPET_MAX_LENGTH
+from ..core.config import GOOGLE_API_KEY_ENV, GOOGLE_CSE_ID, SEARCH_RESULT_COUNT, SEARCH_SNIPPET_MAX_LENGTH
 
 logger = logging.getLogger("EzTalkProxy.WebSearch")
 
@@ -15,7 +15,9 @@ async def perform_web_search(query: str, rid: str) -> List[Dict[str, str]]:
     results = []
     actual_google_api_key = GOOGLE_API_KEY_ENV
     if not actual_google_api_key or not GOOGLE_CSE_ID:
-        logger.warning(f"RID-{rid}: Web search skipped, GOOGLE_API_KEY_ENV or GOOGLE_CSE_ID not set.")
+        logger.warning(f"RID-{rid}: Web search skipped. GOOGLE_API_KEY or GOOGLE_CSE_ID not set in environment variables.")
+        logger.warning(f"RID-{rid}: To enable web search, please create a .env file in the root directory of the 'backdAiTalk' project and add your Google API Key and Custom Search Engine ID.")
+        logger.warning(f"RID-{rid}: Example .env file content:\n# Google Custom Search API Key\nGOOGLE_API_KEY=\"YOUR_GOOGLE_API_KEY\"\n# Google Custom Search Engine ID\nGOOGLE_CSE_ID=\"YOUR_GOOGLE_CSE_ID\"")
         return results
     if not query:
         logger.warning(f"RID-{rid}: Web search skipped, query is empty.")
