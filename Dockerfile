@@ -16,4 +16,4 @@ EXPOSE 7860
 
 # 容器启动时执行的最终命令
 # 它会用uvicorn来运行run.py文件中的名为"app"的FastAPI实例
-CMD ["uvicorn", "run:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["uvicorn", "eztalk_proxy.main:app", "--host", "0.0.0.0", "--port", "7860"]
