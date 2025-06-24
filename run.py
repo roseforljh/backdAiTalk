@@ -22,7 +22,7 @@ if __name__ == "__main__":
     logging.info(f"Host: {APP_HOST}, Port: {APP_PORT}")
     logging.info(f"Log Level: {LOG_LEVEL_FROM_ENV}")
     
-    uvicorn.app(
+    uvicorn.run(
         "eztalk_proxy.main:app",
         host=APP_HOST,
         port=APP_PORT,
