@@ -1,5 +1,5 @@
 fastapi>=0.100.0
-uvicorn[standard]
+uvicorn[standard]>=0.23.0
 
 httpx[http2]>=0.25.0
 
