@@ -1,7 +1,5 @@
 ---
-title: BackdAiTalk API
-emoji: 🚀
+title: backdAiTalk
 sdk: docker
-docker_file: deployment/Dockerfile
-app_port: 7860
+app_port: 8000 
 ---
