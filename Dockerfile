@@ -1,19 +1,60 @@
-# 使用一个标准的、轻量级的 Python 镜像
-FROM python:3.9-slim
+# ---- Builder Stage ----
+FROM python:3.9-slim-buster as builder
 
-# 设置工作目录，后续所有操作都在这个目录里
+ENV PYTHONUNBUFFERED 1
+
 WORKDIR /app
 
-# 将当前文件夹（包含run.py, requirements.txt等）的所有内容复制到容器的/app目录
-COPY . .
+# Install build-time dependencies if any
+# RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 
-# 安装在 requirements.txt 中定义的所有依赖项
-# 使用 --no-cache-dir 来减小最终镜像的体积
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies
+COPY ../requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# 暴露我们在README.md中为应用指定的端口
+# ---- Final Stage ----
+FROM python:3.9-slim-buster as final
+
+ENV PYTHONUNBUFFERED 1
+ENV APP_HOME /app
+ENV PATH=$APP_HOME/.local/bin:$PATH
+ENV TEMP_UPLOAD_DIR=${APP_HOME}/temp_document_uploads
+
+WORKDIR ${APP_HOME}
+
+# Create a non-root user and group
+RUN groupadd -r appgroup && useradd --no-log-init -r -g appgroup appuser
+
+# Create the temporary upload directory and set permissions
+RUN mkdir -p ${TEMP_UPLOAD_DIR} && \
+    chown -R appuser:appgroup ${TEMP_UPLOAD_DIR} && \
+    chmod -R 750 ${TEMP_UPLOAD_DIR}
+
+# Copy installed packages from the builder stage
+COPY --from=builder /root/.local /home/appuser/.local
+
+# Copy application code
+# We do not copy the .env file into the image.
+# Configuration should be passed via environment variables at runtime.
+COPY ../eztalk_proxy ./eztalk_proxy
+COPY ../run.py .
+
+# Copy the entrypoint script and make it executable
+COPY ./deployment/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh && \
+    chown appuser:appgroup /entrypoint.sh
+
+# Ensure the .local directory is owned by the appuser
+RUN chown -R appuser:appgroup /home/appuser/.local
+
+# Expose the default port the application runs on.
+# This can be overridden by setting the PORT environment variable.
 EXPOSE 7860
 
-# 容器启动时执行的最终命令
-# 它会用uvicorn来运行run.py文件中的名为"app"的FastAPI实例
+# Switch to the non-root user
+USER appuser
+
+# Set the entrypoint and default command
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["uvicorn", "run:app", "--host", "0.0.0.0", "--port", "7860"]
