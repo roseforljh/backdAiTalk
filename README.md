@@ -1,8 +1,7 @@
 ---
 title: BackdAiTalk API
-emoji: 📦
-colorFrom: green
-colorTo: blue
+emoji: 🚀
 sdk: docker
+docker_file: deployment/Dockerfile
 app_port: 7860
 ---
