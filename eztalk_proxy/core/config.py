@@ -27,7 +27,7 @@ MIN_FLUSH_LENGTH_HEURISTIC = int(os.getenv("MIN_FLUSH_LENGTH_HEURISTIC", "80"))
 
 COMMON_HEADERS = {"X-Accel-Buffering": "no"}
 
-TEMP_UPLOAD_DIR = os.getenv("TEMP_UPLOAD_DIR", "temp_document_uploads")
+TEMP_UPLOAD_DIR = os.getenv("TEMP_UPLOAD_DIR", "/tmp/temp_document_uploads")
 MAX_DOCUMENT_UPLOAD_SIZE_MB = int(os.getenv("MAX_DOCUMENT_UPLOAD_SIZE_MB", "20"))
 MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT = int(os.getenv("MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT", "15000"))
 
