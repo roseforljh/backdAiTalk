@@ -23,7 +23,8 @@ from ..models.api_models import (
     SimpleTextApiMessagePy,
     PartsApiMessagePy,
     AppStreamEventPy,
-    PyTextContentPart
+    PyTextContentPart,
+    PyInlineDataContentPart
 )
 from ..core.config import (
     TEMP_UPLOAD_DIR,
