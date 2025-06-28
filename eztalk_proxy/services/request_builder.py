@@ -14,8 +14,7 @@ from ..models.api_models import (
 from ..core.config import (
     DEFAULT_OPENAI_API_BASE_URL,
     OPENAI_COMPATIBLE_PATH,
-    GOOGLE_API_BASE_URL,
-    GOOGLE_API_KEY_ENV
+    GOOGLE_API_BASE_URL
 )
 # Assuming prompts will be moved and consolidated
 from ..prompts.katex import KATEX_FORMATTING_INSTRUCTION, DEEPSEEK_KATEX_FORMATTING_INSTRUCTION, QWEN_KATEX_FORMATTING_INSTRUCTION
@@ -164,23 +163,9 @@ def prepare_gemini_rest_api_request(
 
     model_name = chat_input.model
     base_api_url = GOOGLE_API_BASE_URL.rstrip('/')
-    
-    # 使用环境变量中的Google API密钥（如果有），否则使用前端提供的API密钥
-    api_key = GOOGLE_API_KEY_ENV if GOOGLE_API_KEY_ENV else chat_input.api_key
-    
-    # 检查API密钥是否以"sk-"开头（OpenAI格式）
-    if api_key and api_key.startswith("sk-"):
-        # 如果是OpenAI格式的API密钥，使用Authorization头部而不是URL参数
-        target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?alt=sse"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-    else:
-        # 否则，使用标准的Google API密钥方式
-        target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={api_key}&alt=sse"
-        headers = {"Content-Type": "application/json"}
+    target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={chat_input.api_key}&alt=sse"
 
+    headers = {"Content-Type": "application/json"}
     json_payload: Dict[str, Any] = {}
     
     messages_to_convert_or_use: List[PartsApiMessagePy] = []
@@ -271,7 +256,7 @@ def prepare_gemini_rest_api_request(
                         json_payload["generationConfig"] = {}
                     json_payload["generationConfig"]["toolConfig"] = {"functionCallingConfig": tool_config_payload}
 
-    logger.info(f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0] if '?key=' in target_url else target_url}... Payload keys: {list(json_payload.keys())}")
+    logger.info(f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0]}... Payload keys: {list(json_payload.keys())}")
     if "generationConfig" in json_payload: logger.info(f"{log_prefix}: generationConfig in REST payload: {json_payload['generationConfig']}")
 
     return target_url, headers, json_payload

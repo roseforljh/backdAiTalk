@@ -23,9 +23,7 @@ from ..models.api_models import (
     SimpleTextApiMessagePy,
     PartsApiMessagePy,
     AppStreamEventPy,
-    PyTextContentPart,
-    GenerationConfigPy,  # 修改这一行
-    ThinkingConfigPy     # 修改这一行
+    PyTextContentPart
 )
 from ..core.config import (
     TEMP_UPLOAD_DIR,
@@ -89,40 +87,6 @@ async def handle_openai_compatible_request(
 ):
     log_prefix = f"RID-{request_id}"
     
-    # 检测是否是Gemini模型
-    is_gemini_model = "gemini" in chat_input.model.lower()
-    
-    # 如果是Gemini模型，使用Gemini原生API处理
-    if is_gemini_model:
-        logger.info(f"{log_prefix}: Detected Gemini model via OpenAI compatible interface. Using native Gemini API for thinking process.")
-        
-        # 确保有thinking_config
-        if not chat_input.generation_config:
-            chat_input.generation_config = GenerationConfigPy()  # 修改这一行
-        
-        if not chat_input.generation_config.thinking_config:
-            chat_input.generation_config.thinking_config = ThinkingConfigPy(  # 修改这一行
-                include_thoughts=True,
-                thinking_budget=1000  # 可以根据需要调整
-            )
-        else:
-            # 确保includeThoughts为True
-            chat_input.generation_config.thinking_config.include_thoughts = True
-        
-        # 使用Gemini处理函数处理请求
-        from .gemini import handle_gemini_request
-        return await handle_gemini_request(
-            gemini_chat_input=chat_input,
-            uploaded_files=uploaded_documents,
-            fastapi_request_obj=fastapi_request_obj,
-            http_client=http_client,
-            request_id=request_id
-        )
-    
-    # 确保临时上传目录存在
-    if not os.path.exists(TEMP_UPLOAD_DIR):
-        os.makedirs(TEMP_UPLOAD_DIR)
-        
     # Read all file contents into memory immediately, as the file stream can be closed.
     image_parts_in_memory = []
     document_texts = []
@@ -145,9 +109,6 @@ async def handle_openai_compatible_request(
                 try:
                     # Use a unique filename to avoid collisions
                     temp_file_path = os.path.join(TEMP_UPLOAD_DIR, f"{request_id}-{uuid.uuid4()}-{doc_file.filename}")
-                    
-                    # Ensure the directory exists before writing the file
-                    os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
                     
                     # Save the uploaded file to the temporary path
                     await doc_file.seek(0)
@@ -292,18 +253,7 @@ async def handle_openai_compatible_request(
                 yield error_event
         finally:
             is_upstream_ok_final = 'upstream_ok' in locals() and upstream_ok
-            # 检查是否是Gemini模型并且有思考配置
-            is_gemini_model = "gemini" in chat_input.model.lower()
-            is_native_thinking_active = False
-            
-            if is_gemini_model and chat_input.generation_config and chat_input.generation_config.thinking_config:
-                is_native_thinking_active = True
-            
-            # 检查是否有reasoning_effort参数
-            if is_gemini_model and chat_input.custom_model_parameters and "reasoning_effort" in chat_input.custom_model_parameters:
-                is_native_thinking_active = True
-                
-            use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=is_native_thinking_active)
+            use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=False)
             async for final_event in handle_stream_cleanup(processing_state, request_id, is_upstream_ok_final, use_custom_sep, chat_input.provider):
                 yield final_event
             

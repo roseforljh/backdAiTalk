@@ -9,18 +9,9 @@ from typing import Optional
 from .core.config import (
     APP_VERSION, API_TIMEOUT, READ_TIMEOUT, MAX_CONNECTIONS,
     LOG_LEVEL_FROM_ENV,
-    # TEMP_UPLOAD_DIR is imported from config, but will be overridden below for compatibility.
-    TEMP_UPLOAD_DIR as _
+    TEMP_UPLOAD_DIR
 )
 from .api import chat as chat_router
-
-# --- FIX START ---
-# Override TEMP_UPLOAD_DIR to point to a writable directory in cloud environments like Hugging Face Spaces.
-# The root filesystem is often read-only, but /tmp is usually writable.
-# This resolves the "PermissionError: [Errno 13] Permission denied".
-TEMP_UPLOAD_DIR = '/tmp/temp_document_uploads'
-# --- FIX END ---
-
 
 numeric_log_level = getattr(logging, LOG_LEVEL_FROM_ENV.upper(), logging.INFO)
 logging.basicConfig(
@@ -53,7 +44,6 @@ async def lifespan(app_instance: FastAPI):
         app_instance.state.http_client = client_local
         logger.info(f"Lifespan: HTTP客户端初始化成功。Timeout Connect: {API_TIMEOUT}s, Read Timeout: {READ_TIMEOUT}s, Max Connections: {MAX_CONNECTIONS}")
 
-        # The following block will now attempt to create the directory inside /tmp
         if not os.path.exists(TEMP_UPLOAD_DIR):
             try:
                 os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
@@ -130,3 +120,6 @@ async def health_check(request: Request):
 
     response_data = {"status": client_status, "detail": detail_message, "app_version": APP_VERSION}
     return response_data
+
+
+# This block is now handled by the top-level run.py script

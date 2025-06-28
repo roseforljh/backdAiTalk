@@ -118,12 +118,17 @@ async def handle_gemini_request(
         for uploaded_file in uploaded_files:
             mime_type = uploaded_file.content_type.lower() if uploaded_file.content_type else ""
             filename = uploaded_file.filename or "unknown"
-
-            if not mime_type and filename.endswith('.docx'):
-                mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             
             try:
                 if mime_type in IMAGE_MIME_TYPES:
+                    await uploaded_file.seek(0)
+                    file_bytes = await uploaded_file.read()
+                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
+                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
+                    ))
+                elif mime_type in DOCUMENT_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Processing document for Gemini: {filename} ({mime_type})")
                     await uploaded_file.seek(0)
                     file_bytes = await uploaded_file.read()
                     base64_data = base64.b64encode(file_bytes).decode('utf-8')
@@ -146,14 +151,7 @@ async def handle_gemini_request(
                         ))
                     except Exception as docx_e:
                         logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
-                elif mime_type in DOCUMENT_MIME_TYPES:
-                    logger.info(f"{log_prefix}: Processing document for Gemini: {filename} ({mime_type})")
-                    await uploaded_file.seek(0)
-                    file_bytes = await uploaded_file.read()
-                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
-                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
-                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
-                    ))
+
                 elif GEMINI_ENABLE_GCS_UPLOAD and mime_type in VIDEO_AUDIO_MIME_TYPES and GCS_BUCKET_NAME:
                     pass
                 else:
