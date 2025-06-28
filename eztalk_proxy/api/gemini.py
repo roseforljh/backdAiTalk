@@ -171,12 +171,7 @@ async def handle_gemini_request(
             if isinstance(user_msg, PartsApiMessagePy):
                 user_msg.parts.extend(newly_created_multimodal_parts)
             elif isinstance(user_msg, SimpleTextApiMessagePy):
-                # Correctly combine user's text with file content
-                initial_text_part = []
-                if user_msg.content and user_msg.content.strip():
-                    initial_text_part.append(PyTextContentPart(type="text_content", text=user_msg.content))
-                
-                # Prepend the user's text part so it's treated as the primary instruction
+                initial_text_part = [PyTextContentPart(type="text_content", text=user_msg.content)] if user_msg.content else []
                 active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
                     role="user", parts=initial_text_part + newly_created_multimodal_parts
                 )
