@@ -23,7 +23,9 @@ from ..models.api_models import (
     SimpleTextApiMessagePy,
     PartsApiMessagePy,
     AppStreamEventPy,
-    PyTextContentPart
+    PyTextContentPart,
+    GenerationConfig,  # 添加这一行
+    ThinkingConfig     # 添加这一行
 )
 from ..core.config import (
     TEMP_UPLOAD_DIR,
@@ -87,7 +89,37 @@ async def handle_openai_compatible_request(
 ):
     log_prefix = f"RID-{request_id}"
     
-    # Ensure the temporary upload directory exists
+    # 检测是否是Gemini模型
+    is_gemini_model = "gemini" in chat_input.model.lower()
+    
+    # 如果是Gemini模型，使用Gemini原生API处理
+    if is_gemini_model:
+        logger.info(f"{log_prefix}: Detected Gemini model via OpenAI compatible interface. Using native Gemini API for thinking process.")
+        
+        # 确保有thinking_config
+        if not chat_input.generation_config:
+            chat_input.generation_config = GenerationConfig()
+        
+        if not chat_input.generation_config.thinking_config:
+            chat_input.generation_config.thinking_config = ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=1000  # 可以根据需要调整
+            )
+        else:
+            # 确保includeThoughts为True
+            chat_input.generation_config.thinking_config.include_thoughts = True
+        
+        # 使用Gemini处理函数处理请求
+        from .gemini import handle_gemini_request
+        return await handle_gemini_request(
+            gemini_chat_input=chat_input,
+            uploaded_files=uploaded_documents,
+            fastapi_request_obj=fastapi_request_obj,
+            http_client=http_client,
+            request_id=request_id
+        )
+    
+    # 确保临时上传目录存在
     if not os.path.exists(TEMP_UPLOAD_DIR):
         os.makedirs(TEMP_UPLOAD_DIR)
         

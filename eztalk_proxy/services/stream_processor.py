@@ -172,10 +172,14 @@ def should_apply_custom_separator_logic(
     is_native_thinking_active: bool
 ) -> bool:
     log_prefix = f"RID-{request_id}"
+    
+    # 检查是否是通过OpenAI兼容接口使用的Gemini模型
+    is_openai_gemini = not is_google_like_path and "gemini" in request_data.model.lower()
+    
     if request_data.force_custom_reasoning_prompt:
         logger.info(f"{log_prefix}: Custom separator logic FORCED by request.")
         return True
-    if is_google_like_path and is_native_thinking_active:
+    if (is_google_like_path or is_openai_gemini) and is_native_thinking_active:
         logger.info(f"{log_prefix}: Custom separator logic OFF (Google native thinking via part.thought active).")
         return False
     if "deepseek" in request_data.model.lower() or request_data.provider.lower() == "mke":
