@@ -24,8 +24,8 @@ from ..models.api_models import (
     PartsApiMessagePy,
     AppStreamEventPy,
     PyTextContentPart,
-    GenerationConfig,  # 添加这一行
-    ThinkingConfig     # 添加这一行
+    GenerationConfigPy,  # 修改这一行
+    ThinkingConfigPy     # 修改这一行
 )
 from ..core.config import (
     TEMP_UPLOAD_DIR,
@@ -98,10 +98,10 @@ async def handle_openai_compatible_request(
         
         # 确保有thinking_config
         if not chat_input.generation_config:
-            chat_input.generation_config = GenerationConfig()
+            chat_input.generation_config = GenerationConfigPy()  # 修改这一行
         
         if not chat_input.generation_config.thinking_config:
-            chat_input.generation_config.thinking_config = ThinkingConfig(
+            chat_input.generation_config.thinking_config = ThinkingConfigPy(  # 修改这一行
                 include_thoughts=True,
                 thinking_budget=1000  # 可以根据需要调整
             )
