@@ -48,7 +48,6 @@ logger = logging.getLogger("EzTalkProxy.Handlers.Gemini")
 
 IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"]
 DOCUMENT_MIME_TYPES = [
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/pdf",
     "application/x-javascript", "text/javascript",
     "application/x-python", "text/x-python",
@@ -131,6 +130,22 @@ async def handle_gemini_request(
                     newly_created_multimodal_parts.append(PyInlineDataContentPart(
                         type="inline_data_content", mimeType=mime_type, base64Data=base64_data
                     ))
+                elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                    logger.info(f"{log_prefix}: Extracting text from DOCX file for Gemini: {filename}")
+                    await uploaded_file.seek(0)
+                    file_bytes = await uploaded_file.read()
+                    try:
+                        doc_stream = io.BytesIO(file_bytes)
+                        document = docx.Document(doc_stream)
+                        full_text = "\n".join([para.text for para in document.paragraphs])
+                        
+                        extracted_text_content = f"\n\n--- START OF DOCUMENT: {filename} ---\n\n{full_text}\n\n--- END OF DOCUMENT: {filename} ---\n"
+                        
+                        newly_created_multimodal_parts.append(PyTextContentPart(
+                            type="text_content", text=extracted_text_content
+                        ))
+                    except Exception as docx_e:
+                        logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
                 elif mime_type in DOCUMENT_MIME_TYPES:
                     logger.info(f"{log_prefix}: Processing document for Gemini: {filename} ({mime_type})")
                     await uploaded_file.seek(0)
