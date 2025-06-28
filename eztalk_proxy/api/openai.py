@@ -87,6 +87,10 @@ async def handle_openai_compatible_request(
 ):
     log_prefix = f"RID-{request_id}"
     
+    # Ensure the temporary upload directory exists
+    if not os.path.exists(TEMP_UPLOAD_DIR):
+        os.makedirs(TEMP_UPLOAD_DIR)
+        
     # Read all file contents into memory immediately, as the file stream can be closed.
     image_parts_in_memory = []
     document_texts = []
@@ -109,6 +113,9 @@ async def handle_openai_compatible_request(
                 try:
                     # Use a unique filename to avoid collisions
                     temp_file_path = os.path.join(TEMP_UPLOAD_DIR, f"{request_id}-{uuid.uuid4()}-{doc_file.filename}")
+                    
+                    # Ensure the directory exists before writing the file
+                    os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
                     
                     # Save the uploaded file to the temporary path
                     await doc_file.seek(0)
