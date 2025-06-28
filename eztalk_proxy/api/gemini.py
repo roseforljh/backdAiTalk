@@ -58,8 +58,7 @@ DOCUMENT_MIME_TYPES = [
     "text/markdown",
     "text/csv",
     "text/xml",
-    "text/rtf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    "text/rtf"
 ]
 VIDEO_AUDIO_MIME_TYPES = [
     "video/mp4", "video/mpeg", "video/quicktime", "video/x-msvideo", "video/x-flv",
@@ -131,31 +130,30 @@ async def handle_gemini_request(
                     newly_created_multimodal_parts.append(PyInlineDataContentPart(
                         type="inline_data_content", mimeType=mime_type, base64Data=base64_data
                     ))
-                elif mime_type in DOCUMENT_MIME_TYPES:
-                    if mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                        logger.info(f"{log_prefix}: Extracting text from DOCX file for Gemini: {filename}")
-                        await uploaded_file.seek(0)
-                        file_bytes = await uploaded_file.read()
-                        try:
-                            doc_stream = io.BytesIO(file_bytes)
-                            document = docx.Document(doc_stream)
-                            full_text = "\n".join([para.text for para in document.paragraphs])
-                            
-                            extracted_text_content = f"\n\n--- START OF DOCUMENT: {filename} ---\n\n{full_text}\n\n--- END OF DOCUMENT: {filename} ---\n"
-                            
-                            newly_created_multimodal_parts.append(PyTextContentPart(
-                                type="text_content", text=extracted_text_content
-                            ))
-                        except Exception as docx_e:
-                            logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
-                    else:
-                        logger.info(f"{log_prefix}: Processing document for Gemini: {filename} ({mime_type})")
-                        await uploaded_file.seek(0)
-                        file_bytes = await uploaded_file.read()
-                        base64_data = base64.b64encode(file_bytes).decode('utf-8')
-                        newly_created_multimodal_parts.append(PyInlineDataContentPart(
-                            type="inline_data_content", mimeType=mime_type, base64Data=base64_data
+                elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                    logger.info(f"{log_prefix}: Extracting text from DOCX file for Gemini: {filename}")
+                    await uploaded_file.seek(0)
+                    file_bytes = await uploaded_file.read()
+                    try:
+                        doc_stream = io.BytesIO(file_bytes)
+                        document = docx.Document(doc_stream)
+                        full_text = "\n".join([para.text for para in document.paragraphs])
+                        
+                        extracted_text_content = f"\n\n--- START OF DOCUMENT: {filename} ---\n\n{full_text}\n\n--- END OF DOCUMENT: {filename} ---\n"
+                        
+                        newly_created_multimodal_parts.append(PyTextContentPart(
+                            type="text_content", text=extracted_text_content
                         ))
+                    except Exception as docx_e:
+                        logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
+                elif mime_type in DOCUMENT_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Processing document for Gemini: {filename} ({mime_type})")
+                    await uploaded_file.seek(0)
+                    file_bytes = await uploaded_file.read()
+                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
+                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
+                    ))
                 elif GEMINI_ENABLE_GCS_UPLOAD and mime_type in VIDEO_AUDIO_MIME_TYPES and GCS_BUCKET_NAME:
                     pass
                 else:
