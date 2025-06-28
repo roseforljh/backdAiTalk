@@ -253,7 +253,18 @@ async def handle_openai_compatible_request(
                 yield error_event
         finally:
             is_upstream_ok_final = 'upstream_ok' in locals() and upstream_ok
-            use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=False)
+            # 检查是否是Gemini模型并且有思考配置
+            is_gemini_model = "gemini" in chat_input.model.lower()
+            is_native_thinking_active = False
+            
+            if is_gemini_model and chat_input.generation_config and chat_input.generation_config.thinking_config:
+                is_native_thinking_active = True
+            
+            # 检查是否有reasoning_effort参数
+            if is_gemini_model and chat_input.custom_model_parameters and "reasoning_effort" in chat_input.custom_model_parameters:
+                is_native_thinking_active = True
+                
+            use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=is_native_thinking_active)
             async for final_event in handle_stream_cleanup(processing_state, request_id, is_upstream_ok_final, use_custom_sep, chat_input.provider):
                 yield final_event
             
