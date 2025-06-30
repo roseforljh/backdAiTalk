@@ -193,26 +193,9 @@ def prepare_gemini_rest_api_request(
     else:
         json_payload["contents"] = convert_parts_messages_to_rest_api_contents(messages_to_convert_or_use, request_id)
 
-    # Inject the supreme intelligence advisor prompt
-    if "contents" in json_payload and json_payload["contents"]:
-        # Check if a system message already exists
-        system_message_found = False
-        for content in json_payload["contents"]:
-            if content.get("role") == "system":
-                system_message_found = True
-                # Prepend the prompt to the existing system message
-                if "parts" in content and content["parts"]:
-                    content["parts"].insert(0, {"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT})
-                else:
-                    content["parts"] = [{"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT}]
-                break
-        
-        if not system_message_found:
-            # If no system message, create one
-            json_payload["contents"].insert(0, {
-                "role": "system",
-                "parts": [{"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT}]
-            })
+    json_payload["system_instruction"] = {
+        "parts": [{"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT}]
+    }
 
     generation_config_rest: Dict[str, Any] = {}
     if chat_input.generation_config:
