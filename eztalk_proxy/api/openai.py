@@ -183,11 +183,27 @@ async def handle_openai_compatible_request(
 
                 # B. For the last user message, add new document/image context
                 if is_last_user_message:
-                    # Extract user query text for web search from the original parts
-                    user_query_for_search = " ".join([p.get("text", "") for p in current_content_parts if p.get("type") == "text"]).strip()
-
-                    if full_document_context:
-                        current_content_parts.insert(0, {"type": "text", "text": full_document_context})
+                    # --- Text Consolidation Logic ---
+                    # Combine all existing text parts and the new document context into a single string.
+                    # This is crucial for compatibility with endpoints that expect a single text content field.
+                    
+                    # 1. Extract existing text from the current message parts
+                    existing_text = " ".join([p.get("text", "") for p in current_content_parts if p.get("type") == "text"]).strip()
+                    user_query_for_search = existing_text # Use this for web search
+                    
+                    # 2. Prepend the document context to the existing text
+                    final_combined_text = (full_document_context + existing_text) if full_document_context else existing_text
+                    
+                    # 3. Rebuild the content parts: one consolidated text part, and all other non-text parts (like images)
+                    
+                    # Keep only non-text parts from the original message
+                    non_text_parts = [p for p in current_content_parts if p.get("type") != "text"]
+                    
+                    # Create the new consolidated text part
+                    consolidated_text_part = {"type": "text", "text": final_combined_text}
+                    
+                    # Start with the consolidated text, then add historical non-text parts, then new images
+                    current_content_parts = [consolidated_text_part] + non_text_parts
                     if new_image_parts_for_openai:
                         current_content_parts.extend(new_image_parts_for_openai)
 
