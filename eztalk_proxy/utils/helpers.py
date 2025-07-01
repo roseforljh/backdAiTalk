@@ -205,6 +205,7 @@ async def extract_text_from_uploaded_document(
             extracted_text = _extract_text_from_plain_text(uploaded_file_path)
             if not extracted_text:
                  extracted_text = "[后端提示：.doc 文件内容提取可能不完整或失败]"
+        # Treat HTML as a plain text file for extraction, which is a common and effective approach.
         elif effective_mime_type.startswith("text/"):
             extracted_text = _extract_text_from_plain_text(uploaded_file_path)
         else:

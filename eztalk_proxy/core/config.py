@@ -32,10 +32,26 @@ MAX_DOCUMENT_UPLOAD_SIZE_MB = int(os.getenv("MAX_DOCUMENT_UPLOAD_SIZE_MB", "20")
 MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT = int(os.getenv("MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT", "15000"))
 
 SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION = [
+    # Plain Text & Data Formats
     "text/plain",
+    "text/html",
+    "text/csv",
+    "text/markdown",
+    "application/json",
+    "text/xml",
+    "text/rtf",
+    
+    # Document Formats
     "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document", # .docx
+    "application/msword", # .doc
+
+    # Common Code Formats (treated as plain text)
+    "application/x-javascript",
+    "text/javascript",
+    "text/css",
+    "application/x-python",
+    "text/x-python",
 ]
 
 GEMINI_SUPPORTED_UPLOAD_MIMETYPES = [
