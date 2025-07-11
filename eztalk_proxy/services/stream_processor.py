@@ -26,139 +26,44 @@ async def process_openai_like_sse_stream(
     log_prefix = f"RID-{request_id}"
     
     state = current_processing_state
-    state.setdefault("accumulated_content", "")
-    state.setdefault("accumulated_reasoning", "")
     state.setdefault("had_any_reasoning", False)
-    state.setdefault("had_any_content", False)
     state.setdefault("reasoning_finish_event_sent", False)
     state.setdefault("final_finish_event_sent_by_llm_reason", False)
-    state.setdefault("in_think_tag_mode", False)
 
     for choice in parsed_sse_data.get('choices', []):
         delta = choice.get('delta', {})
         finish_reason = choice.get("finish_reason")
 
-        current_reasoning_delta_from_chunk = ""
-        current_content_delta_from_chunk = ""
+        reasoning_chunk = delta.get("reasoning_content")
+        content_chunk = delta.get("content")
+        tool_calls_chunk = delta.get("tool_calls")
 
-        reasoning_chunk_field: Optional[str] = delta.get("reasoning_content")
-        content_chunk_raw: Optional[str] = delta.get("content")
-        role_chunk: Optional[str] = delta.get("role")
-        tool_calls_chunk: Optional[List[Dict[str, Any]]] = delta.get("tool_calls")
+        # Send reasoning chunk immediately if it exists
+        if reasoning_chunk:
+            processed_reasoning = strip_potentially_harmful_html_and_normalize_newlines(str(reasoning_chunk))
+            if processed_reasoning:
+                yield {"type": "reasoning", "text": processed_reasoning, "timestamp": get_current_time_iso()}
+                state["had_any_reasoning"] = True
 
-        if role_chunk and not reasoning_chunk_field and not content_chunk_raw and not tool_calls_chunk:
-            continue
-
-        if reasoning_chunk_field is not None:
-            if not isinstance(reasoning_chunk_field, str): reasoning_chunk_field = str(reasoning_chunk_field)
-            current_reasoning_delta_from_chunk += reasoning_chunk_field
-            state["had_any_reasoning"] = True
-        
-        if content_chunk_raw is not None:
-            if not isinstance(content_chunk_raw, str): content_chunk_raw = str(content_chunk_raw)
-            
-            chunk_to_process_tags = content_chunk_raw
-            
-            if reasoning_chunk_field is None:
-                entering_think_mode = "<think>" in chunk_to_process_tags and not state["in_think_tag_mode"]
-                exiting_think_mode = "</think>" in chunk_to_process_tags and state["in_think_tag_mode"]
-
-                if entering_think_mode:
-                    state["in_think_tag_mode"] = True
-                    parts = chunk_to_process_tags.split("<think>", 1)
-                    if parts: current_content_delta_from_chunk += parts
-                    chunk_to_process_tags = parts
-                    logger.info(f"{log_prefix}: Detected <think>. Enter think_tag_mode. Remainder: '{chunk_to_process_tags[:50]}'")
-                    state["had_any_reasoning"] = True
-                
-                if exiting_think_mode:
-                    parts = chunk_to_process_tags.split("</think>", 1)
-                    if parts: current_reasoning_delta_from_chunk += parts
-                    
-                    full_reasoning_to_flush = state["accumulated_reasoning"] + current_reasoning_delta_from_chunk
-                    if full_reasoning_to_flush:
-                        clean_r_text = strip_potentially_harmful_html_and_normalize_newlines(full_reasoning_to_flush)
-                        if clean_r_text: yield {"type": "reasoning", "text": clean_r_text, "timestamp": get_current_time_iso()}
-                    state["accumulated_reasoning"] = ""
-                    current_reasoning_delta_from_chunk = ""
-                    
-                    if state["had_any_reasoning"] and not state.get("reasoning_finish_event_sent"):
-                        logger.info(f"{log_prefix}: Detected </think>. Sending reasoning_finish.")
-                        yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
-                        state["reasoning_finish_event_sent"] = True
-                    
-                    state["in_think_tag_mode"] = False
-                    chunk_to_process_tags = parts
-                    logger.info(f"{log_prefix}: Exited think_tag_mode. Remainder for content: '{chunk_to_process_tags[:50]}'")
-
-                if state["in_think_tag_mode"]:
-                    if chunk_to_process_tags: current_reasoning_delta_from_chunk += chunk_to_process_tags
-                else:
-                    if chunk_to_process_tags: current_content_delta_from_chunk += chunk_to_process_tags
-            
-            else:
-                 if content_chunk_raw: current_content_delta_from_chunk += content_chunk_raw
-        
-        if current_reasoning_delta_from_chunk:
-            state["accumulated_reasoning"] += current_reasoning_delta_from_chunk
-        
-        if current_content_delta_from_chunk:
-            if state["had_any_reasoning"] and not state.get("reasoning_finish_event_sent"):
-                if state["accumulated_reasoning"]:
-                    processed_r = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_reasoning"])
-                    if processed_r: yield {"type": "reasoning", "text": processed_r, "timestamp": get_current_time_iso()}
-                    state["accumulated_reasoning"] = ""
+        # Send content chunk immediately if it exists
+        if content_chunk:
+            # If we receive content and haven't sent reasoning_finish, send it now.
+            if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
                 yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                 state["reasoning_finish_event_sent"] = True
-            state["accumulated_content"] += current_content_delta_from_chunk
-            if current_content_delta_from_chunk.strip(): state["had_any_content"] = True
+            
+            processed_content = strip_potentially_harmful_html_and_normalize_newlines(str(content_chunk))
+            if processed_content:
+                yield {"type": "content", "text": processed_content, "timestamp": get_current_time_iso()}
 
-        if state["accumulated_reasoning"] and \
-           (len(state["accumulated_reasoning"]) >= MIN_REASONING_FLUSH_CHUNK_SIZE or \
-            "\n" in state["accumulated_reasoning"] or \
-            finish_reason or tool_calls_chunk or \
-            (state["had_any_content"] and not state["in_think_tag_mode"])):
-            
-            processed_text = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_reasoning"])
-            if processed_text:
-                yield {"type": "reasoning", "text": processed_text, "timestamp": get_current_time_iso()}
-            state["accumulated_reasoning"] = ""
-            if state["had_any_reasoning"] and not state.get("reasoning_finish_event_sent"):
-                if finish_reason or tool_calls_chunk or (state["had_any_content"] and not state["in_think_tag_mode"]):
-                    yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
-                    state["reasoning_finish_event_sent"] = True
-        
-        if state["accumulated_content"] and \
-           (len(state["accumulated_content"]) >= MIN_CONTENT_FLUSH_CHUNK_SIZE or \
-            "\n" in state["accumulated_content"] or \
-            finish_reason or tool_calls_chunk):
-            
-            if state.get("had_any_reasoning") and not state.get("reasoning_finish_event_sent"):
-                yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
-                state["reasoning_finish_event_sent"] = True
-                
-            processed_text = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_content"])
-            if processed_text and processed_text.strip():
-                yield {"type": "content", "text": processed_text, "timestamp": get_current_time_iso()}
-            state["accumulated_content"] = ""
-        
+        # Handle tool calls and finish reason
         if tool_calls_chunk or finish_reason:
-            if state["accumulated_reasoning"]:
-                processed_r = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_reasoning"])
-                if processed_r: yield {"type": "reasoning", "text": processed_r, "timestamp": get_current_time_iso()}
-                state["accumulated_reasoning"] = ""
-            if state["accumulated_content"]:
-                processed_c = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_content"])
-                if processed_c and processed_c.strip(): yield {"type": "content", "text": processed_c, "timestamp": get_current_time_iso()}
-                state["accumulated_content"] = ""
-            
-            if state.get("had_any_reasoning") and not state.get("reasoning_finish_event_sent"):
+            # If there was any reasoning, ensure the finish event is sent before the final block.
+            if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
                 yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                 state["reasoning_finish_event_sent"] = True
-            
             if tool_calls_chunk:
                 yield {"type": "tool_calls_chunk", "data": tool_calls_chunk, "timestamp": get_current_time_iso()}
-                state["had_any_content_or_tool_call"] = True
             
             if finish_reason:
                 logger.info(f"{log_prefix}: OpenAI-like choice finish_reason: {finish_reason}.")
