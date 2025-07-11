@@ -66,14 +66,14 @@ async def process_openai_like_sse_stream(
                 if entering_think_mode:
                     state["in_think_tag_mode"] = True
                     parts = chunk_to_process_tags.split("<think>", 1)
-                    if parts[0]: current_content_delta_from_chunk += parts[0]
-                    chunk_to_process_tags = parts[1]
+                    if parts: current_content_delta_from_chunk += parts
+                    chunk_to_process_tags = parts
                     logger.info(f"{log_prefix}: Detected <think>. Enter think_tag_mode. Remainder: '{chunk_to_process_tags[:50]}'")
                     state["had_any_reasoning"] = True
                 
                 if exiting_think_mode:
                     parts = chunk_to_process_tags.split("</think>", 1)
-                    if parts[0]: current_reasoning_delta_from_chunk += parts[0]
+                    if parts: current_reasoning_delta_from_chunk += parts
                     
                     full_reasoning_to_flush = state["accumulated_reasoning"] + current_reasoning_delta_from_chunk
                     if full_reasoning_to_flush:
@@ -88,7 +88,7 @@ async def process_openai_like_sse_stream(
                         state["reasoning_finish_event_sent"] = True
                     
                     state["in_think_tag_mode"] = False
-                    chunk_to_process_tags = parts[1]
+                    chunk_to_process_tags = parts
                     logger.info(f"{log_prefix}: Exited think_tag_mode. Remainder for content: '{chunk_to_process_tags[:50]}'")
 
                 if state["in_think_tag_mode"]:
@@ -138,7 +138,7 @@ async def process_openai_like_sse_stream(
                 state["reasoning_finish_event_sent"] = True
                 
             processed_text = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_content"])
-            if processed_text:
+            if processed_text and processed_text.strip():
                 yield {"type": "content", "text": processed_text, "timestamp": get_current_time_iso()}
             state["accumulated_content"] = ""
         
@@ -149,7 +149,7 @@ async def process_openai_like_sse_stream(
                 state["accumulated_reasoning"] = ""
             if state["accumulated_content"]:
                 processed_c = strip_potentially_harmful_html_and_normalize_newlines(state["accumulated_content"])
-                if processed_c: yield {"type": "content", "text": processed_c, "timestamp": get_current_time_iso()}
+                if processed_c and processed_c.strip(): yield {"type": "content", "text": processed_c, "timestamp": get_current_time_iso()}
                 state["accumulated_content"] = ""
             
             if state.get("had_any_reasoning") and not state.get("reasoning_finish_event_sent"):
@@ -224,7 +224,7 @@ async def handle_stream_cleanup(
 
     if accumulated_content:
         processed_c = strip_potentially_harmful_html_and_normalize_newlines(accumulated_content)
-        if processed_c:
+        if processed_c and processed_c.strip():
             logger.info(f"{log_prefix}: Cleanup: Flushing remaining content: '{processed_c[:100]}...'")
             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=processed_c, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
     
