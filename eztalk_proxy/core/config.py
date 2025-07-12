@@ -46,6 +46,11 @@ SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION = [
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document", # .docx
     "application/msword", # .doc
 
+    # Audio Formats
+    "audio/flac",
+    "audio/wav",
+    "audio/x-wav",
+
     # Common Code Formats (treated as plain text)
     "application/x-javascript",
     "text/javascript",

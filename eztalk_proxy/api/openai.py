@@ -29,7 +29,8 @@ from ..models.api_models import (
 from ..core.config import (
     TEMP_UPLOAD_DIR,
     MAX_DOCUMENT_UPLOAD_SIZE_MB,
-    API_TIMEOUT
+    API_TIMEOUT,
+    GEMINI_SUPPORTED_UPLOAD_MIMETYPES
 )
 from ..utils.helpers import (
     get_current_time_iso,
@@ -89,34 +90,33 @@ async def handle_openai_compatible_request(
     log_prefix = f"RID-{request_id}"
     
     # Read all file contents into memory immediately, as the file stream can be closed.
-    image_parts_in_memory = []
+    multimodal_parts_in_memory = []
     document_texts = []
     if uploaded_documents:
         for doc_file in uploaded_documents:
-            # Process images
-            if doc_file.content_type and doc_file.content_type.lower() in SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI:
+            content_type = doc_file.content_type.lower() if doc_file.content_type else ""
+            # Process images and other directly supported multimodal types by Gemini
+            if content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
                 try:
                     await doc_file.seek(0)
-                    image_bytes = await doc_file.read()
-                    image_parts_in_memory.append({
-                        "content_type": doc_file.content_type,
-                        "data": image_bytes
+                    file_bytes = await doc_file.read()
+                    multimodal_parts_in_memory.append({
+                        "content_type": content_type,
+                        "data": file_bytes,
+                        "type": "inline_data" # Generalize to handle more than just images
                     })
+                    logger.info(f"{log_prefix}: Staged multimodal file '{doc_file.filename}' for Base64 encoding.")
                 except Exception as e:
-                    logger.error(f"{log_prefix}: Failed to read image file {doc_file.filename} into memory: {e}", exc_info=True)
-            # Process other documents
+                    logger.error(f"{log_prefix}: Failed to read multimodal file {doc_file.filename} into memory: {e}", exc_info=True)
+            # Process other documents for text extraction
             else:
                 temp_file_path = ""
                 try:
-                    # Use a unique filename to avoid collisions
                     temp_file_path = os.path.join(TEMP_UPLOAD_DIR, f"{request_id}-{uuid.uuid4()}-{doc_file.filename}")
-                    
-                    # Save the uploaded file to the temporary path
                     await doc_file.seek(0)
                     with open(temp_file_path, "wb") as f:
                         f.write(await doc_file.read())
                     
-                    # Extract text content from the saved document, passing the correct content_type
                     extracted_text = await extract_text_from_uploaded_document(
                         uploaded_file_path=temp_file_path,
                         mime_type=doc_file.content_type,
@@ -126,9 +126,8 @@ async def handle_openai_compatible_request(
                         document_texts.append(extracted_text)
                         logger.info(f"{log_prefix}: Successfully extracted text from document '{doc_file.filename}'.")
                 except Exception as e:
-                    logger.error(f"{log_prefix}: Failed to process document {doc_file.filename}: {e}", exc_info=True)
+                    logger.error(f"{log_prefix}: Failed to process document for text extraction {doc_file.filename}: {e}", exc_info=True)
                 finally:
-                    # Clean up the temporary file
                     if temp_file_path and os.path.exists(temp_file_path):
                         os.remove(temp_file_path)
 
@@ -148,18 +147,25 @@ async def handle_openai_compatible_request(
                 full_document_context = "\n\n".join(document_texts)
                 full_document_context = f"--- Document Content ---\n{full_document_context}\n--- End Document ---\n\n"
 
-            new_image_parts_for_openai: List[Dict[str, Any]] = []
-            if image_parts_in_memory:
-                # Offload CPU-bound resizing and Base64 encoding to a thread pool
-                encoding_tasks = [
-                    asyncio.to_thread(resize_and_encode_image_sync, part["data"])
-                    for part in image_parts_in_memory
-                ]
+            new_multimodal_parts_for_openai: List[Dict[str, Any]] = []
+            if multimodal_parts_in_memory:
+                encoding_tasks = []
+                for part in multimodal_parts_in_memory:
+                    # For images, use the resizing function; for others, just encode
+                    if part["content_type"] in SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI:
+                        encoding_tasks.append(asyncio.to_thread(resize_and_encode_image_sync, part["data"]))
+                    else: # For audio, video etc.
+                        encoding_tasks.append(asyncio.to_thread(base64.b64encode, part["data"]))
+
                 encoded_results = await asyncio.gather(*encoding_tasks)
-                for i, encoded_data in enumerate(encoded_results):
-                    content_type = image_parts_in_memory[i]["content_type"]
-                    data_uri = f"data:{content_type};base64,{encoded_data}"
-                    new_image_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
+                
+                for i, encoded_data_bytes in enumerate(encoded_results):
+                    encoded_data_str = encoded_data_bytes if isinstance(encoded_data_bytes, str) else encoded_data_bytes.decode('utf-8')
+                    content_type = multimodal_parts_in_memory[i]["content_type"]
+                    data_uri = f"data:{content_type};base64,{encoded_data_str}"
+                    
+                    # OpenAI uses 'image_url' for all multimodal content via data URI
+                    new_multimodal_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
 
             # 2. Build the final message list, preserving history correctly
             for i, msg_abstract in enumerate(chat_input.messages):
@@ -204,8 +210,8 @@ async def handle_openai_compatible_request(
                     
                     # Start with the consolidated text, then add historical non-text parts, then new images
                     current_content_parts = [consolidated_text_part] + non_text_parts
-                    if new_image_parts_for_openai:
-                        current_content_parts.extend(new_image_parts_for_openai)
+                    if new_multimodal_parts_for_openai:
+                        current_content_parts.extend(new_multimodal_parts_for_openai)
 
                 # C. Finalize content format for the message
                 if not current_content_parts:
