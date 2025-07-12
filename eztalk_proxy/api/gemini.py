@@ -7,6 +7,7 @@ import base64
 import io
 from typing import Optional, List
 
+import google.generativeai as genai
 import docx
 from fastapi import Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -26,7 +27,9 @@ from ..core.config import (
     GEMINI_ENABLE_GCS_UPLOAD,
     GCS_BUCKET_NAME,
     GCS_PROJECT_ID,
-    API_TIMEOUT
+    API_TIMEOUT,
+    GOOGLE_API_KEY_ENV,
+    MAX_DOCUMENT_UPLOAD_SIZE_MB
 )
 from ..utils.helpers import (
     get_current_time_iso,
@@ -79,6 +82,9 @@ async def handle_gemini_request(
     log_prefix = f"RID-{request_id}"
     active_messages_for_llm: List[AbstractApiMessagePy] = [msg.model_copy(deep=True) for msg in gemini_chat_input.messages]
     newly_created_multimodal_parts: List[IncomingApiContentPart] = []
+
+    if GOOGLE_API_KEY_ENV:
+        genai.configure(api_key=GOOGLE_API_KEY_ENV)
 
     if gemini_chat_input.use_web_search:
         query = ""
@@ -156,10 +162,45 @@ async def handle_gemini_request(
                     logger.info(f"{log_prefix}: Processing audio/video for Gemini: {filename} ({mime_type})")
                     await uploaded_file.seek(0)
                     file_bytes = await uploaded_file.read()
-                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
-                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
-                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
-                    ))
+                    file_size = len(file_bytes)
+                    
+                    # Use File API for large files as recommended by Google
+                    if file_size > (MAX_DOCUMENT_UPLOAD_SIZE_MB * 1024 * 1024):
+                        logger.info(f"{log_prefix}: Uploading large video '{filename}' ({file_size / 1024 / 1024:.2f} MB) to Gemini File API.")
+                        try:
+                            # We need to run this in a separate thread as the SDK is synchronous
+                            loop = asyncio.get_running_loop()
+                            video_file = await loop.run_in_executor(
+                                None,
+                                lambda: genai.upload_file(
+                                    path=io.BytesIO(file_bytes),
+                                    display_name=filename,
+                                    mime_type=mime_type
+                                )
+                            )
+                            logger.info(f"{log_prefix}: Uploaded '{filename}', waiting for processing. URI: {video_file.uri}")
+                            
+                            # Wait for the file to be processed
+                            while video_file.state.name == "PROCESSING":
+                                await asyncio.sleep(5) # Non-blocking sleep
+                                video_file = await loop.run_in_executor(None, lambda: genai.get_file(video_file.name))
+                                logger.info(f"{log_prefix}: File '{filename}' state: {video_file.state.name}")
+
+                            if video_file.state.name == "ACTIVE":
+                                newly_created_multimodal_parts.append(PyFileUriContentPart(
+                                    type="file_uri_content", fileUri=video_file.uri, mimeType=mime_type
+                                ))
+                                logger.info(f"{log_prefix}: File '{filename}' is active and ready to use.")
+                            else:
+                                logger.error(f"{log_prefix}: File '{filename}' failed to process. State: {video_file.state.name}")
+
+                        except Exception as file_api_e:
+                            logger.error(f"{log_prefix}: Gemini File API upload failed for {filename}: {file_api_e}", exc_info=True)
+                    else:
+                        base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                        newly_created_multimodal_parts.append(PyInlineDataContentPart(
+                            type="inline_data_content", mimeType=mime_type, base64Data=base64_data
+                        ))
                 else:
                     logger.warning(f"{log_prefix}: Skipping unsupported file type for Gemini: {filename} ({mime_type})")
             except Exception as e:
