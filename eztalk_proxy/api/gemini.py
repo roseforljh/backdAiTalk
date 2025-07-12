@@ -260,27 +260,33 @@ async def handle_gemini_request(
                     if line.startswith("data:"):
                         json_str = line[len("data:"):].strip()
                         try:
+                            logger.debug(f"Received from Gemini: {json_str}")
                             sse_data = orjson.loads(json_str)
                             openai_like_sse = {"id": f"gemini-{request_id}", "choices": []}
                             
                             for candidate in sse_data.get("candidates", []):
-                                delta = {}
                                 content_parts = candidate.get("content", {}).get("parts", [])
-                                for part in content_parts:
-                                    if "thought" in part:
-                                        if "text" in part["thought"]:
-                                            delta["reasoning_content"] = str(part["thought"]["text"])
-                                    if "text" in part:
-                                        delta["content"] = part["text"]
-                                
-                                choice = {
-                                    "delta": delta,
-                                    "finish_reason": candidate.get("finishReason")
-                                }
-                                openai_like_sse["choices"].append(choice)
-                            
-                            async for event in process_openai_like_sse_stream(openai_like_sse, processing_state, request_id):
-                                yield await sse_event_serializer_rest(AppStreamEventPy(**event))
+                                is_thought_part = any("thought" in part for part in content_parts)
+
+                                if is_thought_part:
+                                    for part in content_parts:
+                                        if "thought" in part and part.get("text"):
+                                            reasoning_text = part["text"]
+                                            yield await sse_event_serializer_rest(AppStreamEventPy(type="reasoning", text=reasoning_text))
+                                else:
+                                    delta = {}
+                                    for part in content_parts:
+                                        if "text" in part:
+                                            delta["content"] = part["text"]
+                                    
+                                    if delta:
+                                        choice = {
+                                            "delta": delta,
+                                            "finish_reason": candidate.get("finishReason")
+                                        }
+                                        openai_like_sse = {"id": f"gemini-{request_id}", "choices": [choice]}
+                                        async for event in process_openai_like_sse_stream(openai_like_sse, processing_state, request_id):
+                                            yield await sse_event_serializer_rest(AppStreamEventPy(**event))
 
                         except orjson.JSONDecodeError:
                             logger.warning(f"{log_prefix}: Skipping non-JSON line in Gemini stream: {line}")
