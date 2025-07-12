@@ -9,7 +9,8 @@ COPY . .
 
 # 安装在 requirements.txt 中定义的所有依赖项
 # 使用 --no-cache-dir 来减小最终镜像的体积
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y gcc libportaudio-dev && \
+    pip install --no-cache-dir -r requirements.txt
 
 # 暴露我们在README.md中为应用指定的端口
 EXPOSE 7860
