@@ -1,11 +1,10 @@
-import os
 import logging
 import httpx
 import orjson
 import asyncio
 import base64
 import io
-from typing import Optional, List
+from typing import List
 
 import google.generativeai as genai
 import docx
@@ -24,19 +23,13 @@ from ..models.api_models import (
     PyFileUriContentPart
 )
 from ..core.config import (
-    GEMINI_ENABLE_GCS_UPLOAD,
-    GCS_BUCKET_NAME,
-    GCS_PROJECT_ID,
     API_TIMEOUT,
     GOOGLE_API_KEY_ENV,
     MAX_DOCUMENT_UPLOAD_SIZE_MB
 )
 from ..utils.helpers import (
     get_current_time_iso,
-    orjson_dumps_bytes_wrapper,
-    strip_potentially_harmful_html_and_normalize_newlines,
-    extract_sse_lines,
-    upload_to_gcs
+    orjson_dumps_bytes_wrapper
 )
 from ..services.request_builder import prepare_gemini_rest_api_request
 from ..services.stream_processor import (
@@ -63,10 +56,12 @@ DOCUMENT_MIME_TYPES = [
     "text/xml",
     "text/rtf"
 ]
-VIDEO_AUDIO_MIME_TYPES = [
+VIDEO_MIME_TYPES = [
     "video/mp4", "video/mpeg", "video/quicktime", "video/x-msvideo", "video/x-flv",
-    "video/x-matroska", "video/webm", "video/x-ms-wmv", "video/3gpp", "video/x-m4v",
-    "audio/wav", "audio/mpeg", "audio/aac", "audio/ogg", "audio/opus", "audio/flac"
+    "video/x-matroska", "video/webm", "video/x-ms-wmv", "video/3gpp", "video/x-m4v"
+]
+AUDIO_MIME_TYPES = [
+    "audio/wav", "audio/mpeg", "audio/aac", "audio/ogg", "audio/opus", "audio/flac", "audio/3gpp"
 ]
 
 async def sse_event_serializer_rest(event_data: AppStreamEventPy) -> bytes:
@@ -158,8 +153,16 @@ async def handle_gemini_request(
                     except Exception as docx_e:
                         logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
 
-                elif mime_type in VIDEO_AUDIO_MIME_TYPES:
-                    logger.info(f"{log_prefix}: Processing audio/video for Gemini: {filename} ({mime_type})")
+                elif mime_type in AUDIO_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Processing audio for Gemini: {filename} ({mime_type})")
+                    await uploaded_file.seek(0)
+                    file_bytes = await uploaded_file.read()
+                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
+                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
+                    ))
+                elif mime_type in VIDEO_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Processing video for Gemini: {filename} ({mime_type})")
                     await uploaded_file.seek(0)
                     file_bytes = await uploaded_file.read()
                     file_size = len(file_bytes)
