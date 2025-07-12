@@ -152,8 +152,14 @@ async def handle_gemini_request(
                     except Exception as docx_e:
                         logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
 
-                elif GEMINI_ENABLE_GCS_UPLOAD and mime_type in VIDEO_AUDIO_MIME_TYPES and GCS_BUCKET_NAME:
-                    pass
+                elif mime_type in VIDEO_AUDIO_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Processing audio/video for Gemini: {filename} ({mime_type})")
+                    await uploaded_file.seek(0)
+                    file_bytes = await uploaded_file.read()
+                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
+                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
+                    ))
                 else:
                     logger.warning(f"{log_prefix}: Skipping unsupported file type for Gemini: {filename} ({mime_type})")
             except Exception as e:
