@@ -270,7 +270,7 @@ async def handle_gemini_request(
                                     if "thought" in part:
                                         if "text" in part["thought"]:
                                             delta["reasoning_content"] = str(part["thought"]["text"])
-                                    elif "text" in part:
+                                    if "text" in part:
                                         delta["content"] = part["text"]
                                 
                                 choice = {
