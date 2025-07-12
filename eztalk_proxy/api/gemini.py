@@ -267,9 +267,9 @@ async def handle_gemini_request(
                                 delta = {}
                                 content_parts = candidate.get("content", {}).get("parts", [])
                                 for part in content_parts:
-                                    if part.get("thought"):
-                                        if "text" in part:
-                                            delta["reasoning_content"] = str(part["text"])
+                                    if "thought" in part:
+                                        if "text" in part["thought"]:
+                                            delta["reasoning_content"] = str(part["thought"]["text"])
                                     elif "text" in part:
                                         delta["content"] = part["text"]
                                 
