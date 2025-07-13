@@ -1,4 +1,5 @@
 ---
+<<<<<<< HEAD
 title: EzTalk Proxy
 emoji: 🚀
 colorFrom: blue
@@ -25,3 +26,15 @@ secrets:
 4.  **Secret name**: `GOOGLE_API_KEY`
 5.  **Secret value**: 粘贴您的谷歌 AI Studio API 密钥。
 6.  保存后，Hugging Face 会自动重新构建您的 Space。新的构建将拥有网络访问权限和 API 密钥。
+=======
+title: Backend
+emoji: 🐨
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+pinned: false
+license: mit
+---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+>>>>>>> ea649e55cb7a25db11c11edf8ef83bd87766c984
