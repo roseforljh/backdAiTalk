@@ -4,7 +4,6 @@ import logging
 import datetime
 from typing import Any, Dict, List, Tuple, Optional
 import os
-import shutil
 import uuid
 
 from fastapi.responses import JSONResponse
@@ -13,7 +12,6 @@ from fastapi import UploadFile
 from ..core.config import (
     COMMON_HEADERS,
     MAX_SSE_LINE_LENGTH,
-    TEMP_UPLOAD_DIR,
     SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION,
     MAX_DOCUMENT_CONTENT_CHARS_FOR_PROMPT,
 )
@@ -41,11 +39,6 @@ except ImportError:
     docx = None
     logging.warning("python-docx library not found. DOCX text extraction will not be available.")
 
-try:
-    import speech_recognition as sr
-except ImportError:
-    sr = None
-    logging.warning("SpeechRecognition library not found. Audio file text extraction will not be available.")
 
 logger = logging.getLogger("EzTalkProxy.Utils")
 
@@ -184,30 +177,6 @@ def _extract_text_from_plain_text(file_path: str) -> Optional[str]:
         logger.error(f"Error extracting text from plain text file {file_path}: {e}", exc_info=True)
         return None
 
-def _extract_text_from_audio(file_path: str) -> Optional[str]:
-    if not sr:
-        logger.warning("Attempted to extract audio text, but SpeechRecognition library is not available.")
-        return None
-    
-    r = sr.Recognizer()
-    try:
-        with sr.AudioFile(file_path) as source:
-            audio_data = r.record(source)
-            # 使用Google的免费语音识别API
-            text = r.recognize_google(audio_data, language='zh-CN')
-            return text.strip()
-    except FileNotFoundError:
-        logger.error(f"Audio file not found for extraction: {file_path}")
-        return None
-    except sr.UnknownValueError:
-        logger.warning(f"Google Speech Recognition could not understand audio from {file_path}")
-        return "[语音识别失败：无法理解的音频]"
-    except sr.RequestError as e:
-        logger.error(f"Could not request results from Google Speech Recognition service for {file_path}; {e}")
-        return f"[语音识别失败：API请求错误 {e}]"
-    except Exception as e:
-        logger.error(f"Error extracting text from audio file {file_path}: {e}", exc_info=True)
-        return None
 
 async def extract_text_from_uploaded_document(
     uploaded_file_path: str,
@@ -226,8 +195,6 @@ async def extract_text_from_uploaded_document(
     if effective_mime_type in SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION:
         if effective_mime_type == "application/pdf":
             extracted_text = _extract_text_from_pdf_pypdf2(uploaded_file_path)
-        elif effective_mime_type in ["audio/flac", "audio/wav", "audio/x-wav"]:
-            extracted_text = _extract_text_from_audio(uploaded_file_path)
         elif effective_mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
             extracted_text = _extract_text_from_docx_python_docx(uploaded_file_path)
         elif effective_mime_type == "application/msword":

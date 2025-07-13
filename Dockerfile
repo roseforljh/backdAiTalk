@@ -1,20 +1,28 @@
-# 使用一个标准的、轻量级的 Python 镜像
-FROM python:3.9-slim
+# ---- Build Stage ----
+FROM python:3.9-slim as builder
 
-# 设置工作目录，后续所有操作都在这个目录里
 WORKDIR /app
 
-# 将当前文件夹（包含run.py, requirements.txt等）的所有内容复制到容器的/app目录
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# ---- Final Stage ----
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# 从构建阶段复制已安装的依赖
+COPY --from=builder /root/.local /root/.local
+
+# 复制应用代码
 COPY . .
 
-# 安装在 requirements.txt 中定义的所有依赖项
-# 使用 --no-cache-dir 来减小最终镜像的体积
-RUN apt-get update && apt-get install -y gcc portaudio19-dev && \
-    pip install --no-cache-dir -r requirements.txt
+# 确保Python可以找到已安装的库
+ENV PATH=/root/.local/bin:$PATH
 
-# 暴露我们在README.md中为应用指定的端口
+# 暴露端口
 EXPOSE 7860
 
-# 容器启动时执行的最终命令
-# 它会用uvicorn来运行run.py文件中的名为"app"的FastAPI实例
+# 运行应用
 CMD ["uvicorn", "eztalk_proxy.main:app", "--host", "0.0.0.0", "--port", "7860"]

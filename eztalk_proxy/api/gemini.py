@@ -240,56 +240,57 @@ async def handle_gemini_request(
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     async def stream_generator():
-        # This part is moved from the original position to be available for the whole function
-        search_results = []
-        if gemini_chat_input.use_web_search:
-            # Step 1: Extract the original query from the last user message BEFORE any modification.
-            original_query = ""
-            last_user_message_for_query = next((msg for msg in reversed(active_messages_for_llm) if msg.role == 'user'), None)
-            if last_user_message_for_query:
-                if isinstance(last_user_message_for_query, SimpleTextApiMessagePy):
-                    original_query = last_user_message_for_query.content
-                elif isinstance(last_user_message_for_query, PartsApiMessagePy):
-                    # Assume the user's typed text is the last text part.
-                    # This is a safeguard against re-searching the injected context.
-                    text_parts = [part.text for part in last_user_message_for_query.parts if isinstance(part, PyTextContentPart)]
-                    if text_parts:
-                        original_query = text_parts[-1]
-
-            # Step 2: Perform web search if the original query is not empty.
-            if original_query:
-                yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="Searching web..."))
-                search_results = await perform_web_search(original_query, request_id)
-                
-                # Step 3: If search results are found, inject them into the message list.
-                if search_results:
-                    yield await sse_event_serializer_rest(AppStreamEventPy(type="web_search_results", results=search_results))
-                    search_context_content = generate_search_context_message_content(original_query, search_results)
-                    context_part = PyTextContentPart(type="text_content", text=search_context_content)
-                    
-                    # Find the last user message again to modify it.
-                    last_user_message_idx = -1
-                    for i in range(len(active_messages_for_llm) - 1, -1, -1):
-                        if active_messages_for_llm[i].role == 'user':
-                            last_user_message_idx = i
-                            break
-                    
-                    if last_user_message_idx != -1:
-                        user_msg_to_modify = active_messages_for_llm[last_user_message_idx]
-                        if isinstance(user_msg_to_modify, PartsApiMessagePy):
-                            user_msg_to_modify.parts.insert(0, context_part)
-                        elif isinstance(user_msg_to_modify, SimpleTextApiMessagePy):
-                            original_text_part = PyTextContentPart(type="text_content", text=user_msg_to_modify.content)
-                            active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
-                                role="user", parts=[context_part, original_text_part]
-                            )
-                        logger.info(f"{log_prefix}: Injected web search context into the last user message for Gemini.")
-                    yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="Answering..."))
-
         processing_state = {}
         upstream_ok = False
         first_chunk_received = False
+        
         try:
+            # This part is moved from the original position to be available for the whole function
+            search_results = []
+            if gemini_chat_input.use_web_search:
+                # Step 1: Extract the original query from the last user message BEFORE any modification.
+                original_query = ""
+                last_user_message_for_query = next((msg for msg in reversed(active_messages_for_llm) if msg.role == 'user'), None)
+                if last_user_message_for_query:
+                    if isinstance(last_user_message_for_query, SimpleTextApiMessagePy):
+                        original_query = last_user_message_for_query.content
+                    elif isinstance(last_user_message_for_query, PartsApiMessagePy):
+                        # Assume the user's typed text is the last text part.
+                        # This is a safeguard against re-searching the injected context.
+                        text_parts = [part.text for part in last_user_message_for_query.parts if isinstance(part, PyTextContentPart)]
+                        if text_parts:
+                            original_query = text_parts[-1]
+
+                # Step 2: Perform web search if the original query is not empty.
+                if original_query:
+                    yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="Searching web..."))
+                    search_results = await perform_web_search(original_query, request_id)
+                    
+                    # Step 3: If search results are found, inject them into the message list.
+                    if search_results:
+                        yield await sse_event_serializer_rest(AppStreamEventPy(type="web_search_results", results=search_results))
+                        search_context_content = generate_search_context_message_content(original_query, search_results)
+                        context_part = PyTextContentPart(type="text_content", text=search_context_content)
+                        
+                        # Find the last user message again to modify it.
+                        last_user_message_idx = -1
+                        for i in range(len(active_messages_for_llm) - 1, -1, -1):
+                            if active_messages_for_llm[i].role == 'user':
+                                last_user_message_idx = i
+                                break
+                        
+                        if last_user_message_idx != -1:
+                            user_msg_to_modify = active_messages_for_llm[last_user_message_idx]
+                            if isinstance(user_msg_to_modify, PartsApiMessagePy):
+                                user_msg_to_modify.parts.insert(0, context_part)
+                            elif isinstance(user_msg_to_modify, SimpleTextApiMessagePy):
+                                original_text_part = PyTextContentPart(type="text_content", text=user_msg_to_modify.content)
+                                active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
+                                    role="user", parts=[context_part, original_text_part]
+                                )
+                            logger.info(f"{log_prefix}: Injected web search context into the last user message for Gemini.")
+                        yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="Answering..."))
+
             async with http_client.stream("POST", target_url, headers=headers, json=json_payload, timeout=API_TIMEOUT) as response:
                 upstream_ok = response.is_success
                 if not upstream_ok:

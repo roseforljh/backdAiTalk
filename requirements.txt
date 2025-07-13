@@ -19,6 +19,4 @@ python-multipart>=0.0.9
 PyPDF2>=3.0.0
 python-docx>=1.1.0
 Pillow>=10.0.0
-SpeechRecognition>=3.14.0
-PyAudio>=0.2.14
 soundfile>=0.13.1
