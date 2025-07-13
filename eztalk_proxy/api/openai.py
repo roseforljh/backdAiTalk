@@ -252,7 +252,12 @@ async def handle_openai_compatible_request(
                 request_id=request_id
             )
 
-            async with http_client.stream("POST", current_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
+            final_api_url = current_api_url
+            if chat_input.api_address and chat_input.api_address.endswith('#'):
+                final_api_url = chat_input.api_address[:-1]
+                logger.info(f"{log_prefix}: Overriding API URL to: {final_api_url}")
+
+            async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
                 upstream_ok = response.status_code == 200
                 response.raise_for_status()
                 
