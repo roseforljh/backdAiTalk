@@ -71,13 +71,39 @@ def error_response(
 def strip_potentially_harmful_html_and_normalize_newlines(text: str) -> str:
     if not isinstance(text, str):
         return ""
-    text = re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<[^>]+>", "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Isolate code blocks to protect them from HTML stripping
+    code_blocks = []
+    
+    def replace_with_placeholder(match):
+        code_blocks.append(match.group(0))
+        return f"__CODE_BLOCK_PLACEHOLDER_{len(code_blocks)-1}__"
+
+    # Regex to find ```...``` code blocks
+    code_block_regex = re.compile(r"```[\s\S]*?```", re.DOTALL)
+    
+    # Replace code blocks with placeholders
+    text_with_placeholders = code_block_regex.sub(replace_with_placeholder, text)
+
+    # Strip HTML from the non-code parts
+    stripped_text = re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<[^>]+>", "", text_with_placeholders, flags=re.IGNORECASE | re.DOTALL)
+
+    # Restore code blocks
+    for i, block in enumerate(code_blocks):
+        stripped_text = stripped_text.replace(f"__CODE_BLOCK_PLACEHOLDER_{i}__", block)
+    
+    text = stripped_text
+
     separator_prefix_pattern_regex = r"\s*(---###)"
     text = re.sub(separator_prefix_pattern_regex, r"\n\n\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    lines = text.split('\n')
-    stripped_lines = [line.strip() for line in lines]
-    text = "\n".join(stripped_lines)
+    
+    # Avoid stripping lines inside code blocks
+    if not code_blocks:
+        lines = text.split('\n')
+        stripped_lines = [line.strip() for line in lines]
+        text = "\n".join(stripped_lines)
+
     return text
 
 def extract_sse_lines(buffer: bytearray) -> Tuple[List[bytes], bytearray]:
