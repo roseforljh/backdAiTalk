@@ -1,5 +1,6 @@
 import orjson
 import logging
+import copy
 from typing import List, Dict, Any, Optional, Union, Tuple
 from urllib.parse import urljoin
 
@@ -37,7 +38,7 @@ def prepare_openai_request(
         "Accept": "text/event-stream"
     }
 
-    final_messages = list(processed_messages)
+    final_messages = copy.deepcopy(processed_messages)
     model_name_lower = request_data.model.lower()
     # 禁用自动注入系统提示的功能，以避免与模型自身逻辑冲突
     # instruction = ""

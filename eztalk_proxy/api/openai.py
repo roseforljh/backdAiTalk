@@ -168,58 +168,50 @@ async def handle_openai_compatible_request(
                     new_multimodal_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
 
             # 2. Build the final message list, preserving history correctly
+            # --- Refactored Message Processing Logic ---
             for i, msg_abstract in enumerate(chat_input.messages):
                 msg_dict: Dict[str, Any] = {"role": msg_abstract.role}
                 is_last_user_message = (i == len(chat_input.messages) - 1 and msg_abstract.role == "user")
+
+                content_parts = []
                 
-                current_content_parts = []
-                
-                # A. Reconstruct content from history, preserving all parts
+                # Step 1: Convert message content into a unified 'parts' format
                 if isinstance(msg_abstract, SimpleTextApiMessagePy):
                     if msg_abstract.content:
-                        current_content_parts.append({"type": "text", "text": msg_abstract.content})
+                        content_parts.append({"type": "text", "text": msg_abstract.content})
                 elif isinstance(msg_abstract, PartsApiMessagePy):
                     for part in msg_abstract.parts:
                         if isinstance(part, PyTextContentPart) and part.text:
-                            current_content_parts.append({"type": "text", "text": part.text})
-                        # This is the critical fix for historical images:
+                            content_parts.append({"type": "text", "text": part.text})
                         elif isinstance(part, PyInlineDataContentPart):
                             data_uri = f"data:{part.mime_type};base64,{part.base64_data}"
-                            current_content_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
+                            content_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
 
-                # B. For the last user message, add new document/image context
+                # Step 2: If it's the last user message, inject new context
                 if is_last_user_message:
-                    # --- Text Consolidation Logic ---
-                    # Combine all existing text parts and the new document context into a single string.
-                    # This is crucial for compatibility with endpoints that expect a single text content field.
-                    
-                    # 1. Extract existing text from the current message parts
-                    existing_text = " ".join([p.get("text", "") for p in current_content_parts if p.get("type") == "text"]).strip()
-                    user_query_for_search = existing_text # Use this for web search
-                    
-                    # 2. Prepend the document context to the existing text
-                    final_combined_text = (full_document_context + existing_text) if full_document_context else existing_text
-                    
-                    # 3. Rebuild the content parts: one consolidated text part, and all other non-text parts (like images)
-                    
-                    # Keep only non-text parts from the original message
-                    non_text_parts = [p for p in current_content_parts if p.get("type") != "text"]
-                    
-                    # Create the new consolidated text part
-                    consolidated_text_part = {"type": "text", "text": final_combined_text}
-                    
-                    # Start with the consolidated text, then add historical non-text parts, then new images
-                    current_content_parts = [consolidated_text_part] + non_text_parts
-                    if new_multimodal_parts_for_openai:
-                        current_content_parts.extend(new_multimodal_parts_for_openai)
+                    # Extract user query for web search BEFORE adding context
+                    user_query_for_search = " ".join([p.get("text", "") for p in content_parts if p.get("type") == "text"]).strip()
 
-                # C. Finalize content format for the message
-                if not current_content_parts:
+                    # Prepend document context to the text parts
+                    if full_document_context:
+                        # Find first text part to prepend to, or insert at the beginning
+                        text_part_index = next((idx for idx, p in enumerate(content_parts) if p["type"] == "text"), -1)
+                        if text_part_index != -1:
+                            content_parts[text_part_index]["text"] = full_document_context + content_parts[text_part_index]["text"]
+                        else:
+                            content_parts.insert(0, {"type": "text", "text": full_document_context})
+                    
+                    # Append new multimodal parts (e.g., uploaded images)
+                    if new_multimodal_parts_for_openai:
+                        content_parts.extend(new_multimodal_parts_for_openai)
+
+                # Step 3: Finalize the content for the message payload
+                if not content_parts:
                     msg_dict["content"] = ""
-                elif len(current_content_parts) == 1 and current_content_parts[0]["type"] == "text":
-                    msg_dict["content"] = current_content_parts[0]["text"]
+                elif len(content_parts) == 1 and content_parts[0]["type"] == "text":
+                    msg_dict["content"] = content_parts[0]["text"]
                 else:
-                    msg_dict["content"] = current_content_parts
+                    msg_dict["content"] = content_parts
                 
                 final_messages_for_llm.append(msg_dict)
 
