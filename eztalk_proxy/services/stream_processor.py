@@ -52,8 +52,7 @@ async def process_openai_like_sse_stream(
             # 直接传递原始文本块，不做任何清洗。
             # 前端渲染库（如MarkdownView）通常有自己的安全机制。
             # 后端清洗可能会破坏合法的格式，如LaTeX。
-            if content_chunk:
-                yield {"type": "content", "text": str(content_chunk), "timestamp": get_current_time_iso()}
+            yield {"type": "content", "text": str(content_chunk), "timestamp": get_current_time_iso()}
 
         # Handle tool calls and finish reason
         if tool_calls_chunk or finish_reason:
