@@ -85,31 +85,6 @@ def strip_potentially_harmful_html_and_normalize_newlines(text: str) -> str:
     
     return text
 
-def cleanup_dirty_markdown(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    
-    # 1. 将块级 HTML 标签替换为换行符，以保留段落结构
-    text = re.sub(r'</p>|</div>|<br\s*/?>', '\n', text, flags=re.IGNORECASE)
-    
-    # 2. 使用非贪婪模式移除所有剩余的 HTML 标签
-    text = re.sub(r'<[^>]*>', '', text)
-    
-    # 3. 修复常见的伪 LaTeX 格式
-    #    - !left(tfrace{}{}) -> $$\frac{}{}$$
-    #    - [^{2}+b={}] -> $$^{2}+b={}$$
-    text = re.sub(r'!left\((.*?)\)', r'$$\1$$', text)
-    text = re.sub(r'\[\^(.*?)\]', r'$$\1$$', text)
-    text = text.replace('tfrace', 'frac')
-
-    # 3. 规范化 Markdown 标题
-    text = re.sub(r'^\s*#+\s*(.*?)\s*#*\s*$', r'# \1', text, flags=re.MULTILINE)
-
-    # 4. 移除多余的空行
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    
-    return text.strip()
-
 def extract_sse_lines(buffer: bytearray) -> Tuple[List[bytes], bytearray]:
     lines: List[bytes] = []
     start_index: int = 0

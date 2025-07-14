@@ -36,8 +36,7 @@ from ..utils.helpers import (
     get_current_time_iso,
     orjson_dumps_bytes_wrapper,
     extract_text_from_uploaded_document,
-    extract_sse_lines,
-    cleanup_dirty_markdown
+    extract_sse_lines
 )
 from ..services.request_builder import prepare_openai_request
 from ..services.stream_processor import (
@@ -79,6 +78,21 @@ def resize_and_encode_image_sync(image_bytes: bytes) -> str:
         logger.error(f"Failed to resize or encode image: {e}", exc_info=True)
         # Fallback to encoding the original bytes if processing fails
         return base64.b64encode(image_bytes).decode('utf-8')
+
+
+def cleanup_dirty_markdown(text: str) -> str:
+    """
+    Cleans up markdown text that may have escaped newlines.
+    This is the primary fix for models that escape newlines (e.g., sending '\n' instead of a literal newline).
+    Other aggressive replacements for characters like '*', '`', or '_' have been removed
+    as they can corrupt complex, sensitive formats like LaTeX mathematical formulas or code snippets.
+    """
+    if not isinstance(text, str):
+        return ""
+    
+    # Replace escaped newlines with actual newlines. 
+    return text.replace('\\n', '\n')
+
 
 
 async def handle_openai_compatible_request(

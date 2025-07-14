@@ -14,7 +14,7 @@ OPENAI_COMPATIBLE_PATH = os.getenv("OPENAI_COMPATIBLE_PATH", "/v1/chat/completio
 GOOGLE_API_KEY_ENV = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
 
-API_TIMEOUT = int(os.getenv("API_TIMEOUT", "300"))
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "600"))
 READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "60.0"))
 MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "200"))
 MAX_SSE_LINE_LENGTH = int(os.getenv("MAX_SSE_LINE_LENGTH", f"{1024 * 1024}"))
