@@ -38,27 +38,28 @@ def prepare_openai_request(
     }
 
     final_messages = list(processed_messages)
-    model_name_lower = request_data.model.lower()
-    instruction = ""
-    if "qwen" in model_name_lower:
-        instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
-    elif "deepseek" in model_name_lower:
-        instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
-    else:
-        instruction = KATEX_FORMATTING_INSTRUCTION
+    # 禁用自动注入系统提示的功能，以避免与模型自身逻辑冲突
+    # model_name_lower = request_data.model.lower()
+    # instruction = ""
+    # if "qwen" in model_name_lower:
+    #     instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
+    # elif "deepseek" in model_name_lower:
+    #     instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
+    # else:
+    #     instruction = KATEX_FORMATTING_INSTRUCTION
 
-    system_message_index = -1
-    for i, msg in enumerate(final_messages):
-        if msg.get("role") == "system":
-            system_message_index = i
-            break
+    # system_message_index = -1
+    # for i, msg in enumerate(final_messages):
+    #     if msg.get("role") == "system":
+    #         system_message_index = i
+    #         break
     
-    if system_message_index != -1:
-        content = final_messages[system_message_index].get("content", "")
-        if isinstance(content, str) and instruction not in content:
-            final_messages[system_message_index]["content"] = f"{content}\n\n{instruction}".strip()
-    else:
-        final_messages.insert(0, {"role": "system", "content": instruction})
+    # if system_message_index != -1:
+    #     content = final_messages[system_message_index].get("content", "")
+    #     if isinstance(content, str) and instruction not in content:
+    #         final_messages[system_message_index]["content"] = f"{content}\n\n{instruction}".strip()
+    # else:
+    #     final_messages.insert(0, {"role": "system", "content": instruction})
 
     payload: Dict[str, Any] = {
         "model": request_data.model,
@@ -193,9 +194,10 @@ def prepare_gemini_rest_api_request(
     else:
         json_payload["contents"] = convert_parts_messages_to_rest_api_contents(messages_to_convert_or_use, request_id)
 
-    json_payload["system_instruction"] = {
-        "parts": [{"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT}]
-    }
+    # 禁用自动注入系统提示的功能，以避免与模型自身逻辑冲突
+    # json_payload["system_instruction"] = {
+    #     "parts": [{"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT}]
+    # }
 
     generation_config_rest: Dict[str, Any] = {}
     if chat_input.generation_config:

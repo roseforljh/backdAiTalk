@@ -127,10 +127,11 @@ async def handle_stream_cleanup(
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="reasoning_finish", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
 
     if accumulated_content:
-        processed_c = strip_potentially_harmful_html_and_normalize_newlines(accumulated_content)
-        if processed_c and processed_c.strip():
-            logger.info(f"{log_prefix}: Cleanup: Flushing remaining content: '{processed_c[:100]}...'")
-            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=processed_c, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+        # 直接传递原始的、未经清洗的累积内容
+        # 这与 process_openai_like_sse_stream 中的逻辑保持一致
+        if accumulated_content.strip():
+            logger.info(f"{log_prefix}: Cleanup: Flushing remaining content: '{accumulated_content[:100]}...'")
+            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=accumulated_content, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
     
     if use_old_custom_separator_logic and state.get("accumulated_text_custom","").strip() and upstream_ok:
         pass
