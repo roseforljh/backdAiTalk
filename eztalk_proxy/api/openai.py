@@ -36,7 +36,8 @@ from ..utils.helpers import (
     get_current_time_iso,
     orjson_dumps_bytes_wrapper,
     extract_text_from_uploaded_document,
-    extract_sse_lines
+    extract_sse_lines,
+    cleanup_dirty_markdown
 )
 from ..services.request_builder import prepare_openai_request
 from ..services.stream_processor import (
@@ -260,6 +261,15 @@ async def handle_openai_compatible_request(
                         if json_str == "[DONE]": break
                         try:
                             sse_data = orjson.loads(json_str)
+                            
+                            # --- NEW: Clean up dirty markdown from non-Gemini models ---
+                            if not chat_input.model.startswith("gemini"):
+                                for choice in sse_data.get('choices', []):
+                                    delta = choice.get('delta', {})
+                                    if 'content' in delta and isinstance(delta['content'], str):
+                                        delta['content'] = cleanup_dirty_markdown(delta['content'])
+                            # --- END NEW ---
+
                             async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id):
                                 yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
                         except orjson.JSONDecodeError:
