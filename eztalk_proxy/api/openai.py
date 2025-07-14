@@ -270,9 +270,12 @@ async def handle_openai_compatible_request(
                 
                 buffer = bytearray()
                 try:
+                    done = False
                     async for chunk in response.aiter_bytes():
+                        if done:
+                            break
                         buffer.extend(chunk)
-                        while True:
+                        while not done:
                             separator_pos = buffer.find(b'\n\n')
                             if separator_pos == -1:
                                 break
@@ -288,6 +291,7 @@ async def handle_openai_compatible_request(
                                 if line.startswith(b"data:"):
                                     json_str = line[5:].strip()
                                     if json_str == b"[DONE]":
+                                        done = True
                                         break
                                     try:
                                         sse_data = orjson.loads(json_str.decode('utf-8'))
@@ -301,9 +305,6 @@ async def handle_openai_compatible_request(
                                             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
                                     except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
                                         logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
-                            else:
-                                continue
-                            break
                 except httpx.StreamClosed:
                     logger.warning(f"{log_prefix}: The stream was closed by the server, possibly due to completion or timeout.")
                 except Exception as e:
