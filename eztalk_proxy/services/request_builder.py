@@ -38,8 +38,8 @@ def prepare_openai_request(
     }
 
     final_messages = list(processed_messages)
+    model_name_lower = request_data.model.lower()
     # 禁用自动注入系统提示的功能，以避免与模型自身逻辑冲突
-    # model_name_lower = request_data.model.lower()
     # instruction = ""
     # if "qwen" in model_name_lower:
     #     instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
