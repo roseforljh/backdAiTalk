@@ -1,9 +1,7 @@
 import logging
-import orjson
-import re
 import asyncio
 import httpx
-from typing import Dict, Any, AsyncGenerator, List, Optional
+from typing import Dict, Any, AsyncGenerator
 
 from ..models.api_models import AppStreamEventPy, ChatRequestModel
 from ..utils.helpers import (
@@ -11,7 +9,6 @@ from ..utils.helpers import (
     orjson_dumps_bytes_wrapper,
     strip_potentially_harmful_html_and_normalize_newlines
 )
-from ..core.config import THINKING_PROCESS_SEPARATOR, MIN_FLUSH_LENGTH_HEURISTIC
 
 logger = logging.getLogger("EzTalkProxy.StreamProcessors")
 
@@ -52,9 +49,11 @@ async def process_openai_like_sse_stream(
                 yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                 state["reasoning_finish_event_sent"] = True
             
-            processed_content = strip_potentially_harmful_html_and_normalize_newlines(str(content_chunk))
-            if processed_content:
-                yield {"type": "content", "text": processed_content, "timestamp": get_current_time_iso()}
+            # 直接传递原始文本块，不做任何清洗。
+            # 前端渲染库（如MarkdownView）通常有自己的安全机制。
+            # 后端清洗可能会破坏合法的格式，如LaTeX。
+            if content_chunk:
+                yield {"type": "content", "text": str(content_chunk), "timestamp": get_current_time_iso()}
 
         # Handle tool calls and finish reason
         if tool_calls_chunk or finish_reason:

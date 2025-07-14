@@ -72,12 +72,15 @@ def strip_potentially_harmful_html_and_normalize_newlines(text: str) -> str:
     if not isinstance(text, str):
         return ""
 
-    # Only remove script and style tags, which are the most common vectors for security issues.
-    # This approach is safer than stripping all tags, as it preserves formatting tags like <div>, <p>, etc.
-    text = re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    # This function is intended to sanitize text by removing harmful HTML and normalizing newlines.
+    # A simple regex is used to remove <script> and <style> tags, which are common XSS vectors.
+    # This is a basic sanitization. For more complex scenarios, a dedicated library like `bleach` would be better.
     
-    separator_prefix_pattern_regex = r"\s*(---###)"
-    text = re.sub(separator_prefix_pattern_regex, r"\n\n\1", text)
+    # Remove script and style tags
+    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Normalize newlines: reduce three or more newlines to exactly two.
     text = re.sub(r"\n{3,}", "\n\n", text)
     
     return text
