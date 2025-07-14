@@ -64,6 +64,20 @@ AUDIO_MIME_TYPES = [
     "audio/wav", "audio/mpeg", "audio/aac", "audio/ogg", "audio/opus", "audio/flac", "audio/3gpp"
 ]
 
+def cleanup_dirty_markdown(text: str) -> str:
+    """
+    Cleans up markdown text that may have escaped newlines.
+    This is the primary fix for models that escape newlines (e.g., sending '\n' instead of a literal newline).
+    Other aggressive replacements for characters like '*', '`', or '_' have been removed
+    as they can corrupt complex, sensitive formats like LaTeX mathematical formulas or code snippets.
+    """
+    if not isinstance(text, str):
+        return ""
+    
+    # Replace escaped newlines with actual newlines. 
+    return text.replace('\\n', '\n')
+
+
 async def sse_event_serializer_rest(event_data: AppStreamEventPy) -> bytes:
     return orjson_dumps_bytes_wrapper(event_data.model_dump(by_alias=True, exclude_none=True))
 
@@ -325,6 +339,8 @@ async def handle_gemini_request(
                                             delta["content"] = part["text"]
                                     
                                     if delta:
+                                        if "content" in delta and isinstance(delta["content"], str):
+                                            delta["content"] = cleanup_dirty_markdown(delta["content"])
                                         choice = {
                                             "delta": delta,
                                             "finish_reason": candidate.get("finishReason")
