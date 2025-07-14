@@ -89,10 +89,13 @@ def cleanup_dirty_markdown(text: str) -> str:
     if not isinstance(text, str):
         return ""
     
-    # 1. 使用非贪婪模式移除 HTML 标签，避免误删 < > 之间的内容
+    # 1. 将块级 HTML 标签替换为换行符，以保留段落结构
+    text = re.sub(r'</p>|</div>|<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    
+    # 2. 使用非贪婪模式移除所有剩余的 HTML 标签
     text = re.sub(r'<[^>]*>', '', text)
     
-    # 2. 修复常见的伪 LaTeX 格式
+    # 3. 修复常见的伪 LaTeX 格式
     #    - !left(tfrace{}{}) -> $$\frac{}{}$$
     #    - [^{2}+b={}] -> $$^{2}+b={}$$
     text = re.sub(r'!left\((.*?)\)', r'$$\1$$', text)
