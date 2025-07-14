@@ -269,53 +269,49 @@ async def handle_openai_compatible_request(
                 response.raise_for_status()
                 
                 buffer = bytearray()
-            async for chunk in response.aiter_bytes():
-                buffer.extend(chunk)
-                while True:
-                    # SSE messages are separated by double newlines
-                    separator_pos = buffer.find(b'\n\n')
-                    if separator_pos == -1:
-                        break # Wait for more data
-
-                    # Extract the full message
-                    message_data = buffer[:separator_pos]
-                    # Move buffer past the message and the separator
-                    buffer = buffer[separator_pos + 2:]
-
-                    if not message_data.strip():
-                        continue
-
-                    # Process each line in the message block
-                    for line in message_data.split(b'\n'):
-                        line = line.strip()
-                        if line.startswith(b"data:"):
-                            json_str = line[5:].strip()
-                            if json_str == b"[DONE]":
+                try:
+                    async for chunk in response.aiter_bytes():
+                        buffer.extend(chunk)
+                        while True:
+                            separator_pos = buffer.find(b'\n\n')
+                            if separator_pos == -1:
                                 break
-                            try:
-                                # Decode here, right after extracting the line
-                                sse_data = orjson.loads(json_str.decode('utf-8'))
-                                
-                                if not chat_input.model.startswith("gemini"):
-                                    for choice in sse_data.get('choices', []):
-                                        delta = choice.get('delta', {})
-                                        if 'content' in delta and isinstance(delta['content'], str):
-                                            delta['content'] = cleanup_dirty_markdown(delta['content'])
 
-                                async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id):
-                                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
-                            except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
-                                logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
-                    else:
-                        continue # Break from inner loop, continue outer while
-                    break # Break from inner loop to fetch more from aiter_bytes
+                            message_data = buffer[:separator_pos]
+                            buffer = buffer[separator_pos + 2:]
 
-        except Exception as e:
-            logger.error(f"{log_prefix}: An error occurred during the OpenAI-like stream: {e}", exc_info=True)
-            is_upstream_ok = 'upstream_ok' in locals() and upstream_ok
-            is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
-            async for error_event in handle_stream_error(e, request_id, is_upstream_ok, is_first_chunk_received):
-                yield error_event
+                            if not message_data.strip():
+                                continue
+
+                            for line in message_data.split(b'\n'):
+                                line = line.strip()
+                                if line.startswith(b"data:"):
+                                    json_str = line[5:].strip()
+                                    if json_str == b"[DONE]":
+                                        break
+                                    try:
+                                        sse_data = orjson.loads(json_str.decode('utf-8'))
+                                        if not chat_input.model.startswith("gemini"):
+                                            for choice in sse_data.get('choices', []):
+                                                delta = choice.get('delta', {})
+                                                if 'content' in delta and isinstance(delta['content'], str):
+                                                    delta['content'] = cleanup_dirty_markdown(delta['content'])
+                                        
+                                        async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id):
+                                            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
+                                    except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
+                                        logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
+                            else:
+                                continue
+                            break
+                except httpx.StreamClosed:
+                    logger.warning(f"{log_prefix}: The stream was closed by the server, possibly due to completion or timeout.")
+                except Exception as e:
+                    logger.error(f"{log_prefix}: An unexpected error occurred during the OpenAI-like stream: {e}", exc_info=True)
+                    is_upstream_ok = 'upstream_ok' in locals() and upstream_ok
+                    is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
+                    async for error_event in handle_stream_error(e, request_id, is_upstream_ok, is_first_chunk_received):
+                        yield error_event
         finally:
             is_upstream_ok_final = 'upstream_ok' in locals() and upstream_ok
             use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=False)
