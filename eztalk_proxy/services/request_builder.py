@@ -15,7 +15,8 @@ from ..models.api_models import (
 from ..core.config import (
     DEFAULT_OPENAI_API_BASE_URL,
     OPENAI_COMPATIBLE_PATH,
-    GOOGLE_API_BASE_URL
+    GOOGLE_API_BASE_URL,
+    GOOGLE_API_KEY_ENV
 )
 # Assuming prompts will be moved and consolidated
 from ..prompts.katex import KATEX_FORMATTING_INSTRUCTION, DEEPSEEK_KATEX_FORMATTING_INSTRUCTION, QWEN_KATEX_FORMATTING_INSTRUCTION
@@ -165,7 +166,9 @@ def prepare_gemini_rest_api_request(
 
     model_name = chat_input.model
     base_api_url = GOOGLE_API_BASE_URL.rstrip('/')
-    target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={chat_input.api_key}&alt=sse"
+    # Always use the GOOGLE_API_KEY_ENV for Gemini requests if it's set.
+    api_key_to_use = GOOGLE_API_KEY_ENV if GOOGLE_API_KEY_ENV else chat_input.api_key
+    target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={api_key_to_use}&alt=sse"
 
     headers = {"Content-Type": "application/json"}
     json_payload: Dict[str, Any] = {}
@@ -224,8 +227,12 @@ def prepare_gemini_rest_api_request(
     if generation_config_rest:
         json_payload["generationConfig"] = generation_config_rest
 
+    gemini_tools_payload = []
+    if chat_input.use_web_search:
+        gemini_tools_payload.append({"googleSearch": {}})
+        logger.info(f"{log_prefix}: Enabled Google Search tool for Gemini.")
+
     if chat_input.tools:
-        gemini_tools_payload = []
         converted_declarations = []
         for tool_entry in chat_input.tools:
             if tool_entry.get("type") == "function" and "function" in tool_entry:
@@ -236,31 +243,32 @@ def prepare_gemini_rest_api_request(
                     "parameters": func_data.get("parameters")
                 }
                 declaration = {k: v for k, v in declaration.items() if v is not None}
-                if "name" in declaration and "description" in declaration :
+                if "name" in declaration and "description" in declaration:
                     converted_declarations.append(declaration)
         
         if converted_declarations:
             gemini_tools_payload.append({"functionDeclarations": converted_declarations})
-            json_payload["tools"] = gemini_tools_payload
 
-            if chat_input.tool_choice:
-                tool_config_payload: Dict[str, Any] = {}
-                if isinstance(chat_input.tool_choice, str):
-                    choice_str = chat_input.tool_choice.upper()
-                    if choice_str in ["AUTO", "ANY", "NONE"]:
-                        tool_config_payload = {"mode": choice_str}
-                    elif choice_str == "REQUIRED":
-                        tool_config_payload = {"mode": "ANY"}
-                elif isinstance(chat_input.tool_choice, dict) and chat_input.tool_choice.get("type") == "function":
-                    func_choice = chat_input.tool_choice.get("function", {})
-                    func_name = func_choice.get("name")
-                    if func_name:
-                        tool_config_payload = {"mode": "ANY", "allowedFunctionNames": [func_name]}
-                
-                if tool_config_payload:
-                    if "generationConfig" not in json_payload:
-                        json_payload["generationConfig"] = {}
-                    json_payload["generationConfig"]["toolConfig"] = {"functionCallingConfig": tool_config_payload}
+    if gemini_tools_payload:
+        json_payload["tools"] = gemini_tools_payload
+        if chat_input.tool_choice:
+            tool_config_payload: Dict[str, Any] = {}
+            if isinstance(chat_input.tool_choice, str):
+                choice_str = chat_input.tool_choice.upper()
+                if choice_str in ["AUTO", "ANY", "NONE"]:
+                    tool_config_payload = {"mode": choice_str}
+                elif choice_str == "REQUIRED":
+                    tool_config_payload = {"mode": "ANY"}
+            elif isinstance(chat_input.tool_choice, dict) and chat_input.tool_choice.get("type") == "function":
+                func_choice = chat_input.tool_choice.get("function", {})
+                func_name = func_choice.get("name")
+                if func_name:
+                    tool_config_payload = {"mode": "ANY", "allowedFunctionNames": [func_name]}
+            
+            if tool_config_payload:
+                if "generationConfig" not in json_payload:
+                    json_payload["generationConfig"] = {}
+                json_payload["generationConfig"]["toolConfig"] = {"functionCallingConfig": tool_config_payload}
 
     logger.info(f"{log_prefix}: Prepared Gemini REST API request. URL: {target_url.split('?key=')[0]}... Payload keys: {list(json_payload.keys())}")
     if "generationConfig" in json_payload: logger.info(f"{log_prefix}: generationConfig in REST payload: {json_payload['generationConfig']}")

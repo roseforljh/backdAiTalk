@@ -20,7 +20,8 @@ from ..models.api_models import (
     PyTextContentPart,
     PyInlineDataContentPart,
     IncomingApiContentPart,
-    PyFileUriContentPart
+    PyFileUriContentPart,
+    WebSearchResult
 )
 from ..core.config import (
     API_TIMEOUT,
@@ -64,18 +65,40 @@ AUDIO_MIME_TYPES = [
     "audio/wav", "audio/mpeg", "audio/aac", "audio/ogg", "audio/opus", "audio/flac", "audio/3gpp"
 ]
 
+import re
+
 def cleanup_dirty_markdown(text: str) -> str:
     """
-    Cleans up markdown text that may have escaped newlines.
-    This is the primary fix for models that escape newlines (e.g., sending '\n' instead of a literal newline).
-    Other aggressive replacements for characters like '*', '`', or '_' have been removed
-    as they can corrupt complex, sensitive formats like LaTeX mathematical formulas or code snippets.
+    Cleans up markdown text that may have escaped newlines or have extra spaces around markdown tokens
+    due to chunked streaming.
     """
     if not isinstance(text, str):
         return ""
     
-    # Replace escaped newlines with actual newlines. 
-    return text.replace('\\n', '\n')
+    # 1. Replace escaped newlines with actual newlines.
+    text = text.replace('\\n', '\n')
+
+    # 2. Collapse multiple spaces into a single space, but not for lines starting with spaces (to preserve code indentation).
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        if line.startswith(' '):
+            cleaned_lines.append(line)
+        else:
+            cleaned_lines.append(re.sub(r' +', ' ', line))
+    text = '\n'.join(cleaned_lines)
+
+    # 3. Fix spaces around markdown bold/italic markers.
+    # Example: "** text **" -> "**text**"
+    text = re.sub(r'\*\*\s+(.*?)\s+\*\*', r'**\1**', text)
+    text = re.sub(r'\*\s+(.*?)\s+\*', r'*\1*', text)
+
+    # 4. Fix spaces inside parentheses or brackets that are adjacent to markdown.
+    # Example: "**Team Vitality** ( France )" -> "**Team Vitality** (France)"
+    text = re.sub(r'\(\s+(.*?)\s+\)', r'(\1)', text)
+    text = re.sub(r'\[\s+(.*?)\s+\]', r'[\1]', text)
+    
+    return text
 
 
 async def sse_event_serializer_rest(event_data: AppStreamEventPy) -> bytes:
@@ -94,40 +117,6 @@ async def handle_gemini_request(
 
     if GOOGLE_API_KEY_ENV:
         genai.configure(api_key=GOOGLE_API_KEY_ENV)
-
-    if gemini_chat_input.use_web_search:
-        query = ""
-        last_user_message_idx = -1
-        for i in range(len(active_messages_for_llm) - 1, -1, -1):
-            if active_messages_for_llm[i].role == 'user':
-                last_user_message_idx = i
-                break
-        
-        if last_user_message_idx != -1:
-            last_user_message = active_messages_for_llm[last_user_message_idx]
-            if isinstance(last_user_message, SimpleTextApiMessagePy):
-                query = last_user_message.content
-            elif isinstance(last_user_message, PartsApiMessagePy):
-                query = " ".join([part.text for part in last_user_message.parts if isinstance(part, PyTextContentPart)])
-
-        if query:
-            search_results = await perform_web_search(query, request_id)
-            if search_results:
-                search_context_content = generate_search_context_message_content(query, search_results)
-                context_part = PyTextContentPart(type="text_content", text=search_context_content)
-                
-                # Prepend the search context to the last user message
-                if last_user_message_idx != -1:
-                    user_msg = active_messages_for_llm[last_user_message_idx]
-                    if isinstance(user_msg, PartsApiMessagePy):
-                        user_msg.parts.insert(0, context_part)
-                    elif isinstance(user_msg, SimpleTextApiMessagePy):
-                        # Convert SimpleTextApiMessage to PartsApiMessage
-                        original_text_part = PyTextContentPart(type="text_content", text=user_msg.content)
-                        active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
-                            role="user", parts=[context_part, original_text_part]
-                        )
-                    logger.info(f"{log_prefix}: Injected web search context into the last user message for Gemini.")
 
     if uploaded_files:
         for uploaded_file in uploaded_files:
@@ -257,54 +246,11 @@ async def handle_gemini_request(
         processing_state = {}
         upstream_ok = False
         first_chunk_received = False
+        full_text = ""
+        grounding_supports = []
+        grounding_chunks_storage = []
         
         try:
-            # This part is moved from the original position to be available for the whole function
-            search_results = []
-            if gemini_chat_input.use_web_search:
-                # Step 1: Extract the original query from the last user message BEFORE any modification.
-                original_query = ""
-                last_user_message_for_query = next((msg for msg in reversed(active_messages_for_llm) if msg.role == 'user'), None)
-                if last_user_message_for_query:
-                    if isinstance(last_user_message_for_query, SimpleTextApiMessagePy):
-                        original_query = last_user_message_for_query.content
-                    elif isinstance(last_user_message_for_query, PartsApiMessagePy):
-                        # Assume the user's typed text is the last text part.
-                        # This is a safeguard against re-searching the injected context.
-                        text_parts = [part.text for part in last_user_message_for_query.parts if isinstance(part, PyTextContentPart)]
-                        if text_parts:
-                            original_query = text_parts[-1]
-
-                # Step 2: Perform web search if the original query is not empty.
-                if original_query:
-                    yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="Searching web..."))
-                    search_results = await perform_web_search(original_query, request_id)
-                    
-                    # Step 3: If search results are found, inject them into the message list.
-                    if search_results:
-                        yield await sse_event_serializer_rest(AppStreamEventPy(type="web_search_results", results=search_results))
-                        search_context_content = generate_search_context_message_content(original_query, search_results)
-                        context_part = PyTextContentPart(type="text_content", text=search_context_content)
-                        
-                        # Find the last user message again to modify it.
-                        last_user_message_idx = -1
-                        for i in range(len(active_messages_for_llm) - 1, -1, -1):
-                            if active_messages_for_llm[i].role == 'user':
-                                last_user_message_idx = i
-                                break
-                        
-                        if last_user_message_idx != -1:
-                            user_msg_to_modify = active_messages_for_llm[last_user_message_idx]
-                            if isinstance(user_msg_to_modify, PartsApiMessagePy):
-                                user_msg_to_modify.parts.insert(0, context_part)
-                            elif isinstance(user_msg_to_modify, SimpleTextApiMessagePy):
-                                original_text_part = PyTextContentPart(type="text_content", text=user_msg_to_modify.content)
-                                active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
-                                    role="user", parts=[context_part, original_text_part]
-                                )
-                            logger.info(f"{log_prefix}: Injected web search context into the last user message for Gemini.")
-                        yield await sse_event_serializer_rest(AppStreamEventPy(type="status_update", stage="Answering..."))
-
             async with http_client.stream("POST", target_url, headers=headers, json=json_payload, timeout=API_TIMEOUT) as response:
                 upstream_ok = response.is_success
                 if not upstream_ok:
@@ -324,6 +270,33 @@ async def handle_gemini_request(
                             openai_like_sse = {"id": f"gemini-{request_id}", "choices": []}
                             
                             for candidate in sse_data.get("candidates", []):
+                                grounding_metadata = candidate.get("groundingMetadata")
+                                if grounding_metadata:
+                                    search_queries = grounding_metadata.get("webSearchQueries", [])
+                                    if "groundingChunks" in grounding_metadata:
+                                        grounding_chunks_storage.extend(grounding_metadata["groundingChunks"])
+                                    
+                                    if "groundingSupports" in grounding_metadata:
+                                        grounding_supports.extend(grounding_metadata["groundingSupports"])
+
+                                    if search_queries:
+                                        logger.info(f"{log_prefix}: Gemini used web search with queries: {search_queries}")
+
+                                    if grounding_chunks_storage:
+                                        web_results = [
+                                            WebSearchResult(
+                                                title=chunk.get("web", {}).get("title", "Unknown Source"),
+                                                url=chunk.get("web", {}).get("uri", "#"),
+                                                snippet=f"Source: {chunk.get('web', {}).get('title', 'N/A')}"
+                                            )
+                                            for chunk in grounding_chunks_storage if chunk.get("web")
+                                        ]
+                                        if web_results:
+                                            yield await sse_event_serializer_rest(AppStreamEventPy(
+                                                type="web_search_results",
+                                                web_search_results=web_results
+                                            ))
+
                                 content_parts = candidate.get("content", {}).get("parts", [])
                                 is_thought_part = any("thought" in part for part in content_parts)
 
@@ -336,7 +309,9 @@ async def handle_gemini_request(
                                     delta = {}
                                     for part in content_parts:
                                         if "text" in part:
-                                            delta["content"] = part["text"]
+                                            text_chunk = part["text"]
+                                            delta["content"] = text_chunk
+                                            full_text += text_chunk
                                     
                                     if delta:
                                         if "content" in delta and isinstance(delta["content"], str):
@@ -359,6 +334,34 @@ async def handle_gemini_request(
         finally:
             is_native_thinking = bool(gemini_chat_input.generation_config and gemini_chat_input.generation_config.thinking_config)
             use_custom_sep = should_apply_custom_separator_logic(gemini_chat_input, request_id, is_google_like_path=True, is_native_thinking_active=is_native_thinking)
+            if grounding_supports and grounding_chunks_storage:
+                logger.info(f"Processing citations for full text. Supports: {len(grounding_supports)}, Chunks: {len(grounding_chunks_storage)}")
+                
+                sorted_supports = sorted(grounding_supports, key=lambda s: s.get("segment", {}).get("endIndex", 0), reverse=True)
+
+                for support in sorted_supports:
+                    segment = support.get("segment", {})
+                    end_index = segment.get("endIndex")
+                    if end_index is None:
+                        continue
+
+                    chunk_indices = support.get("groundingChunkIndices", [])
+                    if chunk_indices:
+                        citation_links = []
+                        for i in chunk_indices:
+                            if i < len(grounding_chunks_storage):
+                                uri = grounding_chunks_storage[i].get("web", {}).get("uri")
+                                if uri:
+                                    citation_links.append(f"[{i + 1}]({uri})")
+
+                        if citation_links:
+                            citation_string = " " + ", ".join(citation_links)
+                            full_text = full_text[:end_index] + citation_string + full_text[end_index:]
+                
+                # Since we cannot re-stream, we will log the result for now.
+                logger.info(f"Text with citations: {full_text}")
+
+
             async for final_event in handle_stream_cleanup(processing_state, request_id, upstream_ok, use_custom_sep, gemini_chat_input.provider):
                 yield final_event
 

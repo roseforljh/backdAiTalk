@@ -4,9 +4,8 @@ import httpx
 import orjson
 import asyncio
 import base64
-import shutil
 import uuid
-from typing import Optional, Dict, Any, AsyncGenerator, List, Union
+from typing import Dict, Any, AsyncGenerator, List
 from io import BytesIO
 
 try:
@@ -28,15 +27,12 @@ from ..models.api_models import (
 )
 from ..core.config import (
     TEMP_UPLOAD_DIR,
-    MAX_DOCUMENT_UPLOAD_SIZE_MB,
     API_TIMEOUT,
     GEMINI_SUPPORTED_UPLOAD_MIMETYPES
 )
 from ..utils.helpers import (
-    get_current_time_iso,
     orjson_dumps_bytes_wrapper,
-    extract_text_from_uploaded_document,
-    extract_sse_lines
+    extract_text_from_uploaded_document
 )
 from ..services.request_builder import prepare_openai_request
 from ..services.stream_processor import (
@@ -78,21 +74,6 @@ def resize_and_encode_image_sync(image_bytes: bytes) -> str:
         logger.error(f"Failed to resize or encode image: {e}", exc_info=True)
         # Fallback to encoding the original bytes if processing fails
         return base64.b64encode(image_bytes).decode('utf-8')
-
-
-def cleanup_dirty_markdown(text: str) -> str:
-    """
-    Cleans up markdown text that may have escaped newlines.
-    This is the primary fix for models that escape newlines (e.g., sending '\n' instead of a literal newline).
-    Other aggressive replacements for characters like '*', '`', or '_' have been removed
-    as they can corrupt complex, sensitive formats like LaTeX mathematical formulas or code snippets.
-    """
-    if not isinstance(text, str):
-        return ""
-    
-    # Replace escaped newlines with actual newlines. 
-    return text.replace('\\n', '\n')
-
 
 
 async def handle_openai_compatible_request(
@@ -233,24 +214,28 @@ async def handle_openai_compatible_request(
             # --- Web Search Logic ---
             if chat_input.use_web_search and user_query_for_search:
                 yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Searching web...").model_dump(by_alias=True, exclude_none=True))
-                search_results = await perform_web_search(user_query_for_search, request_id)
-                if search_results:
-                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="web_search_results", results=search_results).model_dump(by_alias=True, exclude_none=True))
-                    search_context_content = generate_search_context_message_content(user_query_for_search, search_results)
-                    
-                    system_message_found = False
-                    for msg in final_messages_for_llm:
-                        if msg.get("role") == "system":
-                            content = msg.get("content")
-                            if isinstance(content, str):
-                                msg["content"] = search_context_content + "\n\n" + content
-                            system_message_found = True
-                            break
-                    if not system_message_found:
-                        final_messages_for_llm.insert(0, {"role": "system", "content": search_context_content})
-                    
-                    logger.info(f"{log_prefix}: Injected web search context for OpenAI compatible request.")
-                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Answering...").model_dump(by_alias=True, exclude_none=True))
+                try:
+                    search_results = await perform_web_search(user_query_for_search, request_id)
+                    if search_results:
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="web_search_results", results=search_results).model_dump(by_alias=True, exclude_none=True))
+                        search_context_content = generate_search_context_message_content(user_query_for_search, search_results)
+                        
+                        system_message_found = False
+                        for msg in final_messages_for_llm:
+                            if msg.get("role") == "system":
+                                content = msg.get("content")
+                                if isinstance(content, str):
+                                    msg["content"] = search_context_content + "\n\n" + content
+                                system_message_found = True
+                                break
+                        if not system_message_found:
+                            final_messages_for_llm.insert(0, {"role": "system", "content": search_context_content})
+                        
+                        logger.info(f"{log_prefix}: Injected web search context for OpenAI compatible request.")
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Answering...").model_dump(by_alias=True, exclude_none=True))
+                except Exception as e_search:
+                    logger.error(f"{log_prefix}: Web search failed, proceeding without search context. Error: {e_search}", exc_info=True)
+                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Web search failed, answering directly...").model_dump(by_alias=True, exclude_none=True))
 
             # --- API Request and Streaming ---
             current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
@@ -295,11 +280,8 @@ async def handle_openai_compatible_request(
                                         break
                                     try:
                                         sse_data = orjson.loads(json_str.decode('utf-8'))
-                                        if not chat_input.model.startswith("gemini"):
-                                            for choice in sse_data.get('choices', []):
-                                                delta = choice.get('delta', {})
-                                                if 'content' in delta and isinstance(delta['content'], str):
-                                                    delta['content'] = cleanup_dirty_markdown(delta['content'])
+                                        # The problematic markdown cleaning logic for non-Gemini models has been removed
+                                        # to prevent corruption of formatted text like code or LaTeX.
                                         
                                         async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id):
                                             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))

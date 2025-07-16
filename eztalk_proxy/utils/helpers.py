@@ -68,22 +68,6 @@ def error_response(
         headers=final_headers
     )
 
-def strip_potentially_harmful_html_and_normalize_newlines(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-
-    # This function is intended to sanitize text by removing harmful HTML and normalizing newlines.
-    # A simple regex is used to remove <script> and <style> tags, which are common XSS vectors.
-    # This is a basic sanitization. For more complex scenarios, a dedicated library like `bleach` would be better.
-    
-    # Remove script and style tags
-    text = re.sub(r"<script[^>]*>.*?</script>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.IGNORECASE | re.DOTALL)
-
-    # Normalize newlines: reduce three or more newlines to exactly two.
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    
-    return text
 
 def extract_sse_lines(buffer: bytearray) -> Tuple[List[bytes], bytearray]:
     lines: List[bytes] = []

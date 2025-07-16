@@ -98,6 +98,11 @@ class ChatRequestModel(BaseModel):
     custom_extra_body: Optional[Dict[str, Any]] = Field(None, alias="customExtraBody")
     model_config = {"populate_by_name": True}
 
+class WebSearchResult(BaseModel):
+    title: str
+    url: str
+    snippet: str
+
 class AppStreamEventPy(BaseModel):
     type: str
     stage: Optional[str] = None
@@ -112,4 +117,5 @@ class AppStreamEventPy(BaseModel):
     message: Optional[str] = None
     upstream_status: Optional[int] = Field(None, alias="upstreamStatus")
     timestamp: Optional[str] = None
+    web_search_results: Optional[List[WebSearchResult]] = Field(None, alias="webSearchResults")
     model_config = {"populate_by_name": True}

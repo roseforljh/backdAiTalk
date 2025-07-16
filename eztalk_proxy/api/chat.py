@@ -39,8 +39,11 @@ async def chat_proxy_entrypoint(
         logger.error(f"{log_prefix}: Failed to parse or validate chat request JSON: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Invalid chat request data: {e}")
 
-    if chat_input.provider.lower() == "google" and chat_input.model.lower().startswith("gemini"):
-        logger.info(f"{log_prefix}: Dispatching to Gemini handler.")
+    # New routing logic: if the model is a gemini model, always use the gemini handler.
+    is_gemini_model = "gemini" in chat_input.model.lower()
+
+    if is_gemini_model:
+        logger.info(f"{log_prefix}: Dispatching to Gemini handler for model {chat_input.model}.")
         return await gemini.handle_gemini_request(
             gemini_chat_input=chat_input,
             uploaded_files=uploaded_documents,
@@ -49,7 +52,7 @@ async def chat_proxy_entrypoint(
             request_id=request_id,
         )
     else:
-        logger.info(f"{log_prefix}: Dispatching to OpenAI compatible handler.")
+        logger.info(f"{log_prefix}: Dispatching to OpenAI compatible handler for model {chat_input.model}.")
         return await openai.handle_openai_compatible_request(
             chat_input=chat_input,
             uploaded_documents=uploaded_documents,

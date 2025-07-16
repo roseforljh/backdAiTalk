@@ -6,8 +6,7 @@ from typing import Dict, Any, AsyncGenerator
 from ..models.api_models import AppStreamEventPy, ChatRequestModel
 from ..utils.helpers import (
     get_current_time_iso,
-    orjson_dumps_bytes_wrapper,
-    strip_potentially_harmful_html_and_normalize_newlines
+    orjson_dumps_bytes_wrapper
 )
 
 logger = logging.getLogger("EzTalkProxy.StreamProcessors")
@@ -26,6 +25,7 @@ async def process_openai_like_sse_stream(
     state.setdefault("had_any_reasoning", False)
     state.setdefault("reasoning_finish_event_sent", False)
     state.setdefault("final_finish_event_sent_by_llm_reason", False)
+    state.setdefault("accumulated_content", "")
 
     for choice in parsed_sse_data.get('choices', []):
         delta = choice.get('delta', {})
@@ -37,25 +37,29 @@ async def process_openai_like_sse_stream(
 
         # Send reasoning chunk immediately if it exists
         if reasoning_chunk:
-            processed_reasoning = strip_potentially_harmful_html_and_normalize_newlines(str(reasoning_chunk))
-            if processed_reasoning:
-                yield {"type": "reasoning", "text": processed_reasoning, "timestamp": get_current_time_iso()}
+            if reasoning_chunk:
+                yield {"type": "reasoning", "text": str(reasoning_chunk), "timestamp": get_current_time_iso()}
                 state["had_any_reasoning"] = True
 
-        # Send content chunk immediately if it exists
+        # Accumulate content and flush when it reaches a certain size
         if content_chunk:
+            state["accumulated_content"] += str(content_chunk)
             # If we receive content and haven't sent reasoning_finish, send it now.
             if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
                 yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                 state["reasoning_finish_event_sent"] = True
             
-            # 直接传递原始文本块，不做任何清洗。
-            # 前端渲染库（如MarkdownView）通常有自己的安全机制。
-            # 后端清洗可能会破坏合法的格式，如LaTeX。
-            yield {"type": "content", "text": str(content_chunk), "timestamp": get_current_time_iso()}
+            if len(state["accumulated_content"]) >= MIN_CONTENT_FLUSH_CHUNK_SIZE:
+                yield {"type": "content", "text": state["accumulated_content"], "timestamp": get_current_time_iso()}
+                state["accumulated_content"] = ""
 
         # Handle tool calls and finish reason
         if tool_calls_chunk or finish_reason:
+            # Before handling finish or tool calls, flush any remaining content.
+            if state["accumulated_content"]:
+                yield {"type": "content", "text": state["accumulated_content"], "timestamp": get_current_time_iso()}
+                state["accumulated_content"] = ""
+
             # If there was any reasoning, ensure the finish event is sent before the final block.
             if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
                 yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
@@ -109,34 +113,25 @@ async def handle_stream_cleanup(
     state = processing_state
     logger.info(f"{log_prefix}: Stream cleanup. Provider: {provider}. Upstream OK: {upstream_ok}. CustomSep: {use_old_custom_separator_logic}")
 
-    accumulated_reasoning = state.get("accumulated_reasoning", state.get("accumulated_openai_reasoning", ""))
-    accumulated_content = state.get("accumulated_content", state.get("accumulated_openai_content", ""))
-    had_any_reasoning = state.get("had_any_reasoning", state.get("openai_had_any_reasoning", False))
-    reasoning_finish_sent = state.get("reasoning_finish_event_sent", state.get("openai_reasoning_finish_event_sent", False))
+    accumulated_content = state.get("accumulated_content", "")
+    had_any_reasoning = state.get("had_any_reasoning", False)
+    reasoning_finish_sent = state.get("reasoning_finish_event_sent", False)
 
-
-    if accumulated_reasoning:
-        processed_r = strip_potentially_harmful_html_and_normalize_newlines(accumulated_reasoning)
-        if processed_r:
-            logger.info(f"{log_prefix}: Cleanup: Flushing remaining reasoning: '{processed_r[:100]}...'")
-            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="reasoning", text=processed_r, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
-    
+    # If there was reasoning, ensure the finish event is sent.
     if had_any_reasoning and not reasoning_finish_sent:
         logger.info(f"{log_prefix}: Cleanup: Sending reasoning_finish event.")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="reasoning_finish", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
 
+    # Flush any remaining content in the buffer
     if accumulated_content:
-        # 直接传递原始的、未经清洗的累积内容
-        # 这与 process_openai_like_sse_stream 中的逻辑保持一致
-        if accumulated_content.strip():
-            logger.info(f"{log_prefix}: Cleanup: Flushing remaining content: '{accumulated_content[:100]}...'")
-            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=accumulated_content, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
-    
-    if use_old_custom_separator_logic and state.get("accumulated_text_custom","").strip() and upstream_ok:
-        pass
+        logger.info(f"{log_prefix}: Cleanup: Flushing remaining content: '{accumulated_content[:100]}...'")
+        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=accumulated_content, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
 
-    if not upstream_ok and not state.get("final_finish_event_sent_by_llm_reason") and not state.get("final_finish_event_sent_flag_for_cleanup", False):
-        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason="upstream_error_or_connection_failed", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
-    elif not state.get("final_finish_event_sent_by_llm_reason") and not state.get("final_finish_event_sent_flag_for_cleanup", False):
-        final_reason = state.get("final_finish_reason_from_llm", "stream_end")
+    # Send the final finish event if it hasn't been sent already by a finish_reason from the LLM.
+    if not state.get("final_finish_event_sent_by_llm_reason"):
+        final_reason = "stream_end"
+        if not upstream_ok:
+            final_reason = "upstream_error_or_connection_failed"
+        
+        logger.info(f"{log_prefix}: Cleanup: Sending final finish event with reason '{final_reason}'.")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="finish", reason=final_reason, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))

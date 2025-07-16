@@ -39,7 +39,7 @@ async def lifespan(app_instance: FastAPI):
             limits=httpx.Limits(max_connections=MAX_CONNECTIONS),
             http2=True,
             follow_redirects=True,
-            trust_env=False
+            trust_env=True
         )
         app_instance.state.http_client = client_local
         logger.info(f"Lifespan: HTTP客户端初始化成功。Timeout Connect: {API_TIMEOUT}s, Read Timeout: {READ_TIMEOUT}s, Max Connections: {MAX_CONNECTIONS}")
