@@ -21,11 +21,17 @@ class PyInlineDataContentPart(BasePyApiContentPart):
     base64_data: str = Field(alias="base64Data")
     mime_type: str = Field(alias="mimeType")
 
+class PyInputAudioContentPart(BasePyApiContentPart):
+    type: Literal["input_audio_content"] = "input_audio_content"
+    data: str  # Base64 encoded audio data
+    format: str  # Audio format like "wav", "mp3", etc.
+
 IncomingApiContentPart = Annotated[
     Union[
         PyTextContentPart,
         PyFileUriContentPart,
-        PyInlineDataContentPart
+        PyInlineDataContentPart,
+        PyInputAudioContentPart
     ],
     Field(discriminator="type")
 ]

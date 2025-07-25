@@ -23,7 +23,8 @@ from ..models.api_models import (
     PartsApiMessagePy,
     AppStreamEventPy,
     PyTextContentPart,
-    PyInlineDataContentPart
+    PyInlineDataContentPart,
+    PyInputAudioContentPart
 )
 from ..core.config import (
     TEMP_UPLOAD_DIR,
@@ -46,6 +47,77 @@ from ..services.web_search import perform_web_search, generate_search_context_me
 logger = logging.getLogger("EzTalkProxy.Handlers.OpenAI")
 
 SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI = ["image/jpeg", "image/png", "image/gif", "image/webp"]
+
+# 音频和视频类型定义
+AUDIO_MIME_TYPES = [
+    "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/aac", "audio/ogg",
+    "audio/opus", "audio/flac", "audio/3gpp", "audio/amr", "audio/aiff", "audio/x-m4a",
+    "audio/midi", "audio/webm"
+]
+VIDEO_MIME_TYPES = [
+    "video/mp4", "video/mpeg", "video/quicktime", "video/x-msvideo", "video/x-flv",
+    "video/x-matroska", "video/webm", "video/x-ms-wmv", "video/3gpp", "video/x-m4v"
+]
+
+def get_audio_format_from_mime_type(mime_type: str) -> str:
+    """从MIME类型提取音频格式，用于OpenAI兼容格式"""
+    mime_to_format = {
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/opus": "opus",
+        "audio/flac": "flac",
+        "audio/3gpp": "3gp",
+        "audio/amr": "amr",
+        "audio/aiff": "aiff",
+        "audio/x-m4a": "m4a",
+        "audio/midi": "midi",
+        "audio/webm": "webm"
+    }
+    return mime_to_format.get(mime_type.lower(), mime_type.split('/')[-1])
+
+def is_gemini_model(model_name: str) -> bool:
+    """检测是否为Gemini模型"""
+    if not model_name:
+        return False
+    model_lower = model_name.lower()
+    return "gemini" in model_lower
+
+def is_gemini_openai_compatible_request(chat_input) -> bool:
+    """检测是否为使用OpenAI兼容格式的Gemini模型请求"""
+    return is_gemini_model(chat_input.model)
+
+def supports_multimodal_content(model_name: str) -> bool:
+    """检测模型是否支持多模态内容（音频、视频、图像）"""
+    if not model_name:
+        return False
+    model_lower = model_name.lower()
+    
+    # Gemini模型支持多模态
+    if "gemini" in model_lower:
+        return True
+    
+    # OpenAI GPT-4o系列支持多模态
+    if "gpt-4o" in model_lower:
+        return True
+    
+    # Claude 3.5 Sonnet支持图像，但不支持音频/视频
+    # 为了保持一致性，我们也允许它处理，让模型自己决定
+    if "claude-3" in model_lower or "claude-3.5" in model_lower:
+        return True
+    
+    # 其他可能支持多模态的模型可以在这里添加
+    return False
+
+def is_google_official_api(api_address: str) -> bool:
+    """检测是否为Google官方API地址"""
+    if not api_address:
+        return False
+    api_lower = api_address.lower()
+    return "generativelanguage.googleapis.com" in api_lower or "aiplatform.googleapis.com" in api_lower
 
 MAX_IMAGE_DIMENSION = 2048
 
@@ -88,22 +160,54 @@ async def handle_openai_compatible_request(
     # Read all file contents into memory immediately, as the file stream can be closed.
     multimodal_parts_in_memory = []
     document_texts = []
+    # 检测是否为Gemini模型以启用增强的多模态支持
+    is_gemini_request = is_gemini_openai_compatible_request(chat_input)
+    # 检测模型是否支持多模态内容
+    supports_multimodal = supports_multimodal_content(chat_input.model)
+    # 检测是否为Google官方API
+    is_official_google_api = is_google_official_api(chat_input.api_address or "")
+    
     if uploaded_documents:
         for doc_file in uploaded_documents:
             content_type = doc_file.content_type.lower() if doc_file.content_type else ""
-            # Process images and other directly supported multimodal types by Gemini
-            if content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
+            
+            # 为支持多模态的模型提供音频/视频/图像支持
+            if supports_multimodal and content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
+                # 如果是Gemini模型但使用第三方API，给出警告
+                if is_gemini_request and not is_official_google_api and content_type in (AUDIO_MIME_TYPES + VIDEO_MIME_TYPES):
+                    logger.warning(f"{log_prefix}: Using third-party API '{chat_input.api_address}' for Gemini model with audio/video content. This may not work properly.")
                 try:
                     await doc_file.seek(0)
                     file_bytes = await doc_file.read()
+                    file_size = len(file_bytes)
+                    
+                    logger.info(f"{log_prefix}: Processing multimodal file '{doc_file.filename}' ({file_size / 1024 / 1024:.2f} MB) for model {chat_input.model}")
+                    
                     multimodal_parts_in_memory.append({
                         "content_type": content_type,
                         "data": file_bytes,
-                        "type": "inline_data" # Generalize to handle more than just images
+                        "type": "inline_data",
+                        "filename": doc_file.filename,
+                        "file_size": file_size
                     })
-                    logger.info(f"{log_prefix}: Staged multimodal file '{doc_file.filename}' for Base64 encoding.")
+                    logger.info(f"{log_prefix}: Staged multimodal file '{doc_file.filename}' ({content_type}, {file_size / 1024 / 1024:.2f} MB) for processing with {chat_input.model}.")
                 except Exception as e:
                     logger.error(f"{log_prefix}: Failed to read multimodal file {doc_file.filename} into memory: {e}", exc_info=True)
+            # 对于不支持多模态的模型，提供友好的错误信息
+            elif content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
+                logger.warning(f"{log_prefix}: Model '{chat_input.model}' does not support multimodal content. Skipping file '{doc_file.filename}' ({content_type})")
+                
+                # 添加到文档文本中作为说明，稍后在event_stream_generator中发送错误信息
+                document_texts.append(f"""[Multimodal File Skipped: {doc_file.filename}]
+
+The file '{doc_file.filename}' ({content_type}) was uploaded but cannot be processed by the current model '{chat_input.model}'.
+
+To process audio, video, or image files, please use a multimodal model such as:
+- GPT-4o or GPT-4o-mini (OpenAI)
+- Gemini models (Google)
+- Claude-3.5 Sonnet (Anthropic)
+
+The file was skipped and not included in the analysis.""")
             # Process other documents for text extraction
             else:
                 temp_file_path = ""
@@ -140,28 +244,144 @@ async def handle_openai_compatible_request(
             # 1. Prepare context from newly uploaded files
             full_document_context = ""
             if document_texts:
+                # 检查是否有被跳过的多模态文件，发送警告信息
+                for doc_text in document_texts:
+                    if "[Multimodal File Skipped:" in doc_text:
+                        # 提取文件名
+                        import re
+                        match = re.search(r'\[Multimodal File Skipped: ([^\]]+)\]', doc_text)
+                        if match:
+                            filename = match.group(1)
+                            warning_message = f"Model '{chat_input.model}' does not support audio/video/image content. File '{filename}' was skipped. Please use a multimodal model like GPT-4o, Gemini, or Claude-3.5."
+                            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=warning_message).model_dump(by_alias=True, exclude_none=True))
+                
                 full_document_context = "\n\n".join(document_texts)
                 full_document_context = f"--- Document Content ---\n{full_document_context}\n--- End Document ---\n\n"
+            
+            # 检查是否使用第三方API处理Gemini音频/视频，给出特殊提示
+            if (is_gemini_request and not is_official_google_api and
+                multimodal_parts_in_memory and
+                any(part.get("content_type", "") in AUDIO_MIME_TYPES + VIDEO_MIME_TYPES for part in multimodal_parts_in_memory)):
+                
+                api_domain = chat_input.api_address or "third-party service"
+                warning_message = f"""⚠️ 音频/视频处理可能不稳定
+
+您正在使用第三方API服务 ({api_domain}) 处理Gemini模型的音频/视频内容。
+
+**可能的问题：**
+• 第三方服务可能不完全支持Gemini的多模态功能
+• 音频/视频处理可能被模型拒绝或处理不当
+
+**建议解决方案：**
+1. 使用Google官方API地址：`https://generativelanguage.googleapis.com/v1beta/openai/`
+2. 或者切换到支持音频/视频的其他模型（如GPT-4o）
+
+我们仍会尝试处理您的请求，但结果可能不理想。"""
+                
+                yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=warning_message).model_dump(by_alias=True, exclude_none=True))
 
             new_multimodal_parts_for_openai: List[Dict[str, Any]] = []
             if multimodal_parts_in_memory:
                 encoding_tasks = []
+                valid_parts = []
+                
                 for part in multimodal_parts_in_memory:
-                    # For images, use the resizing function; for others, just encode
-                    if part["content_type"] in SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI:
+                    content_type = part["content_type"]
+                    file_size = part.get("file_size", 0)
+                    filename = part.get("filename", "unknown")
+                    
+                    # 对于大视频文件（>20MB），跳过Base64编码，建议使用Gemini原生API
+                    if content_type in VIDEO_MIME_TYPES and file_size > 20 * 1024 * 1024:
+                        logger.warning(f"{log_prefix}: Large video file '{filename}' ({file_size / 1024 / 1024:.2f} MB) is too large for OpenAI compatible format.")
+                        
+                        # 发送错误信息到前端
+                        error_message = f"Large video file '{filename}' ({file_size / 1024 / 1024:.1f} MB) is too large for OpenAI compatible format. Please use Gemini native API for large videos."
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=error_message).model_dump(by_alias=True, exclude_none=True))
+                        
+                        document_texts.append(f"""[Large Video File: {filename} ({file_size / 1024 / 1024:.1f} MB)]
+
+This video file is too large for OpenAI compatible format processing.
+
+For better video processing, please use:
+- Gemini native API endpoint (generativelanguage.googleapis.com)
+- This will enable File API upload for large videos
+
+The video was uploaded but cannot be analyzed in OpenAI compatible mode due to size limitations.""")
+                        continue
+                    
+                    # 对于中等大小的视频文件（>5MB），给出警告
+                    elif content_type in VIDEO_MIME_TYPES and file_size > 5 * 1024 * 1024:
+                        logger.warning(f"{log_prefix}: Medium video file '{filename}' ({file_size / 1024 / 1024:.2f} MB) may take longer to process.")
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage=f"Processing video file ({file_size / 1024 / 1024:.1f} MB)...").model_dump(by_alias=True, exclude_none=True))
+                    
+                    valid_parts.append(part)
+                    if content_type in SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI:
                         encoding_tasks.append(asyncio.to_thread(resize_and_encode_image_sync, part["data"]))
-                    else: # For audio, video etc.
+                    else:
+                        # 对于音频/视频文件，直接进行Base64编码
                         encoding_tasks.append(asyncio.to_thread(base64.b64encode, part["data"]))
 
-                encoded_results = await asyncio.gather(*encoding_tasks)
-                
-                for i, encoded_data_bytes in enumerate(encoded_results):
-                    encoded_data_str = encoded_data_bytes if isinstance(encoded_data_bytes, str) else encoded_data_bytes.decode('utf-8')
-                    content_type = multimodal_parts_in_memory[i]["content_type"]
-                    data_uri = f"data:{content_type};base64,{encoded_data_str}"
-                    
-                    # OpenAI uses 'image_url' for all multimodal content via data URI
-                    new_multimodal_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
+                if encoding_tasks:
+                    try:
+                        logger.info(f"{log_prefix}: Starting encoding for {len(encoding_tasks)} files...")
+                        
+                        # 发送处理状态更新
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Processing video/audio files...").model_dump(by_alias=True, exclude_none=True))
+                        
+                        # 添加超时保护，防止大视频文件编码卡死
+                        encoded_results = await asyncio.wait_for(
+                            asyncio.gather(*encoding_tasks),
+                            timeout=120.0  # 2分钟超时
+                        )
+                        logger.info(f"{log_prefix}: Encoding completed successfully for {len(encoded_results)} files")
+                        
+                        # 发送编码完成状态
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Files processed, analyzing...").model_dump(by_alias=True, exclude_none=True))
+                        
+                        for i, encoded_data_bytes in enumerate(encoded_results):
+                            encoded_data_str = encoded_data_bytes if isinstance(encoded_data_bytes, str) else encoded_data_bytes.decode('utf-8')
+                            content_type = valid_parts[i]["content_type"]
+                            filename = valid_parts[i].get("filename", "unknown")
+                            
+                            # 根据官方文档，为不同类型的媒体使用正确的格式
+                            if content_type in AUDIO_MIME_TYPES:
+                                # 音频使用input_audio格式，根据官方文档规范
+                                audio_format = get_audio_format_from_mime_type(content_type)
+                                new_multimodal_parts_for_openai.append({
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": encoded_data_str,
+                                        "format": audio_format
+                                    }
+                                })
+                                logger.info(f"{log_prefix}: Successfully encoded and added audio {filename} ({content_type}) using input_audio format with format '{audio_format}'.")
+                            elif content_type in VIDEO_MIME_TYPES:
+                                # 视频仍使用image_url格式（根据官方文档，视频也通过data URI处理）
+                                data_uri = f"data:{content_type};base64,{encoded_data_str}"
+                                new_multimodal_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
+                                logger.info(f"{log_prefix}: Successfully encoded and added video {filename} ({content_type}) using image_url format with data URI.")
+                            else:
+                                # 图像和其他类型使用image_url格式
+                                data_uri = f"data:{content_type};base64,{encoded_data_str}"
+                                new_multimodal_parts_for_openai.append({"type": "image_url", "image_url": {"url": data_uri}})
+                                logger.info(f"{log_prefix}: Successfully encoded and added {filename} ({content_type}) using image_url format. Data URI length: {len(data_uri)}")
+                            
+                    except asyncio.TimeoutError:
+                        logger.error(f"{log_prefix}: File encoding timed out after 2 minutes. This usually happens with large video files.")
+                        
+                        # 发送超时错误信息到前端
+                        timeout_message = "Video/Audio file encoding timed out after 2 minutes. Please try with smaller files or use Gemini native API for large files."
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=timeout_message).model_dump(by_alias=True, exclude_none=True))
+                        
+                        document_texts.append("[Video/Audio files were uploaded but encoding timed out. Please try with smaller files or use Gemini native API for large files.]")
+                    except Exception as e:
+                        logger.error(f"{log_prefix}: Error during file encoding: {e}", exc_info=True)
+                        
+                        # 发送编码错误信息到前端
+                        encoding_error_message = f"Error processing uploaded files: {str(e)}"
+                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=encoding_error_message).model_dump(by_alias=True, exclude_none=True))
+                        
+                        document_texts.append(f"[Multimodal files were uploaded but could not be processed due to encoding error: {str(e)}]")
 
             # 2. Build the final message list, preserving history correctly
             # --- Refactored Message Processing Logic ---
@@ -180,8 +400,29 @@ async def handle_openai_compatible_request(
                         if isinstance(part, PyTextContentPart) and part.text:
                             content_parts.append({"type": "text", "text": part.text})
                         elif isinstance(part, PyInlineDataContentPart):
-                            data_uri = f"data:{part.mime_type};base64,{part.base64_data}"
-                            content_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
+                            # 检查是否为音频类型，使用正确的格式
+                            if part.mime_type in AUDIO_MIME_TYPES:
+                                audio_format = get_audio_format_from_mime_type(part.mime_type)
+                                content_parts.append({
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": part.base64_data,
+                                        "format": audio_format
+                                    }
+                                })
+                            else:
+                                # 视频和图像使用image_url格式
+                                data_uri = f"data:{part.mime_type};base64,{part.base64_data}"
+                                content_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
+                        elif isinstance(part, PyInputAudioContentPart):
+                            # 根据官方文档格式处理音频内容
+                            content_parts.append({
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": part.data,
+                                    "format": part.format
+                                }
+                            })
 
                 # Step 2: If it's the last user message, inject new context
                 if is_last_user_message:
@@ -199,7 +440,13 @@ async def handle_openai_compatible_request(
                     
                     # Append new multimodal parts (e.g., uploaded images)
                     if new_multimodal_parts_for_openai:
+                        logger.info(f"{log_prefix}: Adding {len(new_multimodal_parts_for_openai)} multimodal parts to the last user message")
                         content_parts.extend(new_multimodal_parts_for_openai)
+                        for idx, part in enumerate(new_multimodal_parts_for_openai):
+                            if part["type"] == "input_audio":
+                                logger.info(f"{log_prefix}: Multimodal part {idx+1}: type={part['type']}, format={part['input_audio']['format']}")
+                            else:
+                                logger.info(f"{log_prefix}: Multimodal part {idx+1}: type={part['type']}, data_uri_length={len(part.get('image_url', {}).get('url', ''))}")
 
                 # Step 3: Finalize the content for the message payload
                 if not content_parts:
@@ -215,10 +462,21 @@ async def handle_openai_compatible_request(
             if chat_input.use_web_search and user_query_for_search:
                 yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Searching web...").model_dump(by_alias=True, exclude_none=True))
                 try:
+                    # 对于Gemini模型，我们仍然使用自定义搜索来提供搜索结果
+                    # 因为即使Gemini有内置搜索，在OpenAI兼容格式下可能需要额外处理
                     search_results = await perform_web_search(user_query_for_search, request_id)
                     if search_results:
                         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="web_search_results", results=search_results).model_dump(by_alias=True, exclude_none=True))
-                        search_context_content = generate_search_context_message_content(user_query_for_search, search_results)
+                        
+                        if is_gemini_request:
+                            # 对于Gemini模型，使用增强的搜索上下文
+                            search_context_content = f"""You have access to current web search results for the query: "{user_query_for_search}". Use this information to provide accurate, up-to-date responses. The search results are provided below for your reference:
+
+{generate_search_context_message_content(user_query_for_search, search_results)}
+
+Please integrate this information naturally into your response without explicitly mentioning the search results."""
+                        else:
+                            search_context_content = generate_search_context_message_content(user_query_for_search, search_results)
                         
                         system_message_found = False
                         for msg in final_messages_for_llm:
@@ -231,7 +489,7 @@ async def handle_openai_compatible_request(
                         if not system_message_found:
                             final_messages_for_llm.insert(0, {"role": "system", "content": search_context_content})
                         
-                        logger.info(f"{log_prefix}: Injected web search context for OpenAI compatible request.")
+                        logger.info(f"{log_prefix}: Injected web search context for {'Gemini' if is_gemini_request else 'OpenAI'} compatible request.")
                         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="status_update", stage="Answering...").model_dump(by_alias=True, exclude_none=True))
                 except Exception as e_search:
                     logger.error(f"{log_prefix}: Web search failed, proceeding without search context. Error: {e_search}", exc_info=True)

@@ -69,8 +69,7 @@ import re
 
 def cleanup_dirty_markdown(text: str) -> str:
     """
-    Cleans up markdown text that may have escaped newlines or have extra spaces around markdown tokens
-    due to chunked streaming.
+    Enhanced cleanup for markdown text with special focus on math formulas and table formatting
     """
     if not isinstance(text, str):
         return ""
@@ -78,28 +77,174 @@ def cleanup_dirty_markdown(text: str) -> str:
     # 1. Replace escaped newlines with actual newlines.
     text = text.replace('\\n', '\n')
 
-    # 2. Collapse multiple spaces into a single space, but not for lines starting with spaces (to preserve code indentation).
+    # 2. Fix math formulas first (before other processing)
+    text = fix_math_formulas(text)
+    
+    # 3. Fix table formatting
+    text = fix_table_formatting(text)
+    
+    # 4. Collapse multiple spaces into a single space, but preserve code indentation and math formulas
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
-        if line.startswith(' '):
-            cleaned_lines.append(line)
+        if line.startswith(' ') or '$' in line or '|' in line:
+            cleaned_lines.append(line)  # Preserve formatting for code, math, and tables
         else:
             cleaned_lines.append(re.sub(r' +', ' ', line))
     text = '\n'.join(cleaned_lines)
 
-    # 3. Fix spaces around markdown bold/italic markers.
-    # Example: "** text **" -> "**text**"
-    text = re.sub(r'\*\*\s+(.*?)\s+\*\*', r'**\1**', text)
-    text = re.sub(r'\*\s+(.*?)\s+\*', r'*\1*', text)
+    # 5. Fix spaces around markdown bold/italic markers (but not inside math)
+    if not ('$' in text and text.count('$') % 2 == 0):  # Skip if incomplete math
+        text = re.sub(r'\*\*\s+(.*?)\s+\*\*', r'**\1**', text)
+        text = re.sub(r'\*\s+(.*?)\s+\*', r'*\1*', text)
 
-    # 4. Fix spaces inside parentheses or brackets that are adjacent to markdown.
-    # Example: "**Team Vitality** ( France )" -> "**Team Vitality** (France)"
-    text = re.sub(r'\(\s+(.*?)\s+\)', r'(\1)', text)
-    text = re.sub(r'\[\s+(.*?)\s+\]', r'[\1]', text)
+    # 6. Fix spaces inside parentheses or brackets (but preserve math formulas)
+    text = re.sub(r'\(\s+(.*?)\s+\)', lambda m: f'({m.group(1)})' if '$' not in m.group(0) else m.group(0), text)
+    text = re.sub(r'\[\s+(.*?)\s+\]', lambda m: f'[{m.group(1)}]' if '$' not in m.group(0) else m.group(0), text)
     
     return text
 
+def fix_math_formulas(text: str) -> str:
+    """Fix common LaTeX math formula issues in Gemini output"""
+    if not text or '$' not in text:
+        return text
+    
+    # Fix common LaTeX syntax errors
+    fixes = {
+        # Fix fraction formatting
+        r'\\frac\s+(\w+)\s+(\w+)': r'\\frac{\1}{\2}',
+        r'\\frac\s*\{\s*([^}]+)\s*\}\s*\{\s*([^}]+)\s*\}': r'\\frac{\1}{\2}',
+        
+        # Fix square root formatting
+        r'\\sqrt\s+(\w+)': r'\\sqrt{\1}',
+        r'\\sqrt\s*\{\s*([^}]+)\s*\}': r'\\sqrt{\1}',
+        
+        # Fix sum and integral formatting
+        r'\\sum\s*_\s*(\w+)\s*\^\s*(\w+)': r'\\sum_{\1}^{\2}',
+        r'\\int\s*_\s*(\w+)\s*\^\s*(\w+)': r'\\int_{\1}^{\2}',
+        
+        # Fix spaces around math delimiters
+        r'\$\s+': r'$',
+        r'\s+\$': r'$',
+        r'\$\$\s+': r'$$',
+        r'\s+\$\$': r'$$',
+        
+        # Fix braces spacing
+        r'\{\s+': r'{',
+        r'\s+\}': r'}',
+    }
+    
+    for pattern, replacement in fixes.items():
+        text = re.sub(pattern, replacement, text)
+    
+    # Ensure math delimiters are balanced
+    text = ensure_math_delimiters_balanced(text)
+    
+    return text
+
+def ensure_math_delimiters_balanced(text: str) -> str:
+    """Ensure math delimiters are properly balanced"""
+    # Fix unmatched single dollar signs
+    single_dollar_count = 0
+    result = []
+    i = 0
+    
+    while i < len(text):
+        if i < len(text) - 1 and text[i:i+2] == '$$':
+            result.append('$$')
+            i += 2
+        elif text[i] == '$':
+            single_dollar_count += 1
+            result.append('$')
+            i += 1
+        else:
+            result.append(text[i])
+            i += 1
+    
+    # Add missing closing dollar if needed
+    if single_dollar_count % 2 == 1:
+        result.append('$')
+    
+    return ''.join(result)
+
+def fix_table_formatting(text: str) -> str:
+    """Fix table formatting issues in Gemini output"""
+    if '|' not in text:
+        return text
+    
+    lines = text.split('\n')
+    fixed_lines = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        
+        if '|' in line and line.strip():
+            # Detect table start
+            table_lines = []
+            j = i
+            
+            # Collect all table lines
+            while j < len(lines) and '|' in lines[j] and lines[j].strip():
+                table_lines.append(lines[j])
+                j += 1
+            
+            if table_lines:
+                # Fix table formatting
+                fixed_table = fix_table_lines(table_lines)
+                fixed_lines.extend(fixed_table)
+            
+            i = j
+        else:
+            fixed_lines.append(line)
+            i += 1
+    
+    return '\n'.join(fixed_lines)
+
+def fix_table_lines(table_lines: list) -> list:
+    """Fix individual table lines"""
+    fixed = []
+    
+    for idx, line in enumerate(table_lines):
+        # Clean and format table row
+        cells = [cell.strip() for cell in line.split('|')]
+        
+        # Remove empty cells at start/end
+        if cells and cells[0] == '':
+            cells = cells[1:]
+        if cells and cells[-1] == '':
+            cells = cells[:-1]
+        
+        if cells:
+            formatted_line = '| ' + ' | '.join(cells) + ' |'
+            fixed.append(formatted_line)
+            
+            # Add separator after header if missing
+            if idx == 0 and len(table_lines) > 1:
+                next_line = table_lines[1] if idx + 1 < len(table_lines) else ""
+                if not is_table_separator(next_line):
+                    separator = '| ' + ' | '.join(['---'] * len(cells)) + ' |'
+                    fixed.append(separator)
+    
+    return fixed
+
+def is_table_separator(line: str) -> bool:
+    """Check if line is a table separator"""
+    return bool(re.match(r'^\s*\|[\s\-:]+\|\s*$', line))
+
+def is_google_official_api(api_address: str) -> bool:
+    """Check if the API address is Google's official Gemini API"""
+    if not api_address:
+        return True  # Default to Google official if no address specified
+    
+    google_domains = [
+        "generativelanguage.googleapis.com",
+        "ai.google.dev",
+        "googleapis.com"
+    ]
+    
+    api_address_lower = api_address.lower()
+    return any(domain in api_address_lower for domain in google_domains)
 
 async def sse_event_serializer_rest(event_data: AppStreamEventPy) -> bytes:
     return orjson_dumps_bytes_wrapper(event_data.model_dump(by_alias=True, exclude_none=True))
@@ -115,9 +260,36 @@ async def handle_gemini_request(
     active_messages_for_llm: List[AbstractApiMessagePy] = [msg.model_copy(deep=True) for msg in gemini_chat_input.messages]
     newly_created_multimodal_parts: List[IncomingApiContentPart] = []
 
-    if GOOGLE_API_KEY_ENV:
-        genai.configure(api_key=GOOGLE_API_KEY_ENV)
+    # Only use user-provided API key, no fallback to environment variable
+    if not gemini_chat_input.api_key:
+        logger.error(f"{log_prefix}: No user-provided API key for Gemini")
+        async def error_gen():
+            yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message="No API key provided by user", timestamp=get_current_time_iso()))
+            yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="no_api_key", timestamp=get_current_time_iso()))
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
+    
+    # Check if this is a Google official API address
+    api_address = gemini_chat_input.api_address or ""
+    is_google_official = is_google_official_api(api_address)
+    
+    if is_google_official:
+        # Use Gemini native format for Google official API
+        genai.configure(api_key=gemini_chat_input.api_key)
+        logger.info(f"{log_prefix}: Using Gemini native format for Google official API")
+    else:
+        # Use OpenAI compatible format for non-Google APIs
+        logger.info(f"{log_prefix}: Using OpenAI compatible format for non-Google API: {api_address}")
+        # Redirect to OpenAI compatible handler
+        from . import openai
+        return await openai.handle_openai_compatible_request(
+            chat_input=gemini_chat_input,
+            uploaded_documents=uploaded_files,
+            fastapi_request_obj=fastapi_request_obj,
+            http_client=http_client,
+            request_id=request_id,
+        )
 
+    # Process uploaded files
     if uploaded_files:
         for uploaded_file in uploaded_files:
             mime_type = uploaded_file.content_type.lower() if uploaded_file.content_type else ""
@@ -236,9 +408,10 @@ async def handle_gemini_request(
             chat_input=gemini_chat_input.model_copy(update={'messages': active_messages_for_llm}),
             request_id=request_id
         )
-    except Exception as e_prepare:
+    except Exception as prep_error:
+        logger.error(f"{log_prefix}: Request preparation error: {prep_error}", exc_info=True)
         async def error_gen():
-            yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message=f"请求准备错误: {e_prepare}", timestamp=get_current_time_iso()))
+            yield await sse_event_serializer_rest(AppStreamEventPy(type="error", message=f"请求准备错误: {str(prep_error)}", timestamp=get_current_time_iso()))
             yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="request_error", timestamp=get_current_time_iso()))
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 

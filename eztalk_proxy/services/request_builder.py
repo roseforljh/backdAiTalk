@@ -10,7 +10,8 @@ from ..models.api_models import (
     PartsApiMessagePy,
     PyTextContentPart,
     PyFileUriContentPart,
-    PyInlineDataContentPart
+    PyInlineDataContentPart,
+    PyInputAudioContentPart
 )
 from ..core.config import (
     DEFAULT_OPENAI_API_BASE_URL,
@@ -18,12 +19,22 @@ from ..core.config import (
     GOOGLE_API_BASE_URL,
     GOOGLE_API_KEY_ENV
 )
-# Assuming prompts will be moved and consolidated
-from ..prompts.katex import KATEX_FORMATTING_INSTRUCTION, DEEPSEEK_KATEX_FORMATTING_INSTRUCTION, QWEN_KATEX_FORMATTING_INSTRUCTION
+from ..prompts.katex import (
+    KATEX_FORMATTING_INSTRUCTION, 
+    DEEPSEEK_KATEX_FORMATTING_INSTRUCTION, 
+    QWEN_KATEX_FORMATTING_INSTRUCTION,
+    GEMINI_ENHANCED_FORMATTING_INSTRUCTION
+)
 from ..prompts.supreme_intelligence_advisor import SUPREME_INTELLIGENCE_ADVISOR_PROMPT
 from ..utils.helpers import is_gemini_2_5_model
 
 logger = logging.getLogger("EzTalkProxy.Services.RequestBuilder")
+
+def is_gemini_model_in_openai_format(model_name: str) -> bool:
+    """检测是否为使用OpenAI兼容格式的Gemini模型"""
+    if not model_name:
+        return False
+    return "gemini" in model_name.lower()
 
 def prepare_openai_request(
     request_data: ChatRequestModel,
@@ -41,8 +52,11 @@ def prepare_openai_request(
 
     final_messages = copy.deepcopy(processed_messages)
     model_name_lower = request_data.model.lower()
-    instruction = ""
-    if "qwen" in model_name_lower:
+    
+    # 为Gemini模型使用增强的格式化指令
+    if is_gemini_model_in_openai_format(request_data.model):
+        instruction = GEMINI_ENHANCED_FORMATTING_INSTRUCTION
+    elif "qwen" in model_name_lower:
         instruction = QWEN_KATEX_FORMATTING_INSTRUCTION
     elif "deepseek" in model_name_lower:
         instruction = DEEPSEEK_KATEX_FORMATTING_INSTRUCTION
@@ -84,6 +98,31 @@ def prepare_openai_request(
         "tool_choice": request_data.tool_choice,
     })
     
+    # 为Gemini模型添加Google搜索工具支持
+    if is_gemini_model_in_openai_format(request_data.model) and request_data.use_web_search:
+        tools_list = list(payload.get("tools", []) or [])
+        # 添加Google搜索工具（使用OpenAI兼容格式）
+        google_search_tool = {
+            "type": "function",
+            "function": {
+                "name": "google_search",
+                "description": "Search the web using Google to find current information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query to execute"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+        tools_list.append(google_search_tool)
+        payload["tools"] = tools_list
+        logger.info(f"RID-{request_id}: Added Google Search tool for Gemini model in OpenAI format")
+    
     payload = {k: v for k, v in payload.items() if v is not None}
 
     if "qwen" in model_name_lower and isinstance(request_data.qwen_enable_search, bool):
@@ -122,6 +161,16 @@ def convert_parts_messages_to_rest_api_contents(
                         "inlineData": {
                             "mimeType": actual_part.mime_type,
                             "data": actual_part.base64_data
+                        }
+                    })
+                elif isinstance(actual_part, PyInputAudioContentPart):
+                    # 为Gemini REST API格式处理音频内容
+                    # 音频数据作为inlineData处理，mime type根据format推断
+                    mime_type = f"audio/{actual_part.format}"
+                    rest_parts.append({
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": actual_part.data
                         }
                     })
                 elif isinstance(actual_part, PyFileUriContentPart):
@@ -165,10 +214,35 @@ def prepare_gemini_rest_api_request(
     logger.info(f"{log_prefix}: Preparing Gemini REST API request for model {chat_input.model}.")
 
     model_name = chat_input.model
+    
+    # Only use user-provided API key, no fallback to environment variable
+    if not chat_input.api_key:
+        raise ValueError("No user-provided API key for Gemini")
+    
+    # Initialize base_api_url to ensure it's always defined
     base_api_url = GOOGLE_API_BASE_URL.rstrip('/')
-    # Always use the GOOGLE_API_KEY_ENV for Gemini requests if it's set.
-    api_key_to_use = GOOGLE_API_KEY_ENV if GOOGLE_API_KEY_ENV else chat_input.api_key
-    target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={api_key_to_use}&alt=sse"
+    
+    # Use user-provided API address if available, otherwise use Google official
+    if chat_input.api_address:
+        # Check if the user provided a complete URL or just a base URL
+        if "/v1beta/models/" in chat_input.api_address:
+            # User provided a complete URL, use it as is but add streaming parameters
+            base_url = chat_input.api_address.rstrip('/')
+            base_api_url = base_url.split('/v1beta/models/')[0]  # Extract base URL for logging
+            if ":generateContent" in base_url:
+                # Replace generateContent with streamGenerateContent
+                target_url = base_url.replace(":generateContent", ":streamGenerateContent")
+            else:
+                target_url = base_url
+            target_url = f"{target_url}?key={chat_input.api_key}&alt=sse"
+        else:
+            # User provided just a base URL, construct the full path
+            base_api_url = chat_input.api_address.rstrip('/')
+            target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={chat_input.api_key}&alt=sse"
+    else:
+        target_url = f"{base_api_url}/v1beta/models/{model_name}:streamGenerateContent?key={chat_input.api_key}&alt=sse"
+    
+    logger.info(f"{log_prefix}: Using user-provided API key for Gemini request to {base_api_url}")
 
     headers = {"Content-Type": "application/json"}
     json_payload: Dict[str, Any] = {}
@@ -197,8 +271,11 @@ def prepare_gemini_rest_api_request(
     else:
         json_payload["contents"] = convert_parts_messages_to_rest_api_contents(messages_to_convert_or_use, request_id)
 
+    # Enhanced system instruction for Gemini with better formatting guidance
+    enhanced_system_prompt = f"{SUPREME_INTELLIGENCE_ADVISOR_PROMPT}\n\n{GEMINI_ENHANCED_FORMATTING_INSTRUCTION}"
+    
     json_payload["system_instruction"] = {
-        "parts": [{"text": SUPREME_INTELLIGENCE_ADVISOR_PROMPT}]
+        "parts": [{"text": enhanced_system_prompt}]
     }
 
     generation_config_rest: Dict[str, Any] = {}
