@@ -33,6 +33,7 @@ export function isGoogleOfficialAPI(apiAddress) {
 /**
  * Parses the incoming request body, supporting both JSON and multipart/form-data.
  * This is crucial for compatibility with the Android client.
+ * *** PATCHED to handle FormData parts without a 'name' in Content-Disposition. ***
  * @param {Request} request The incoming request object.
  * @returns {Promise<object>} The parsed request data.
  */
@@ -43,7 +44,30 @@ export async function parseRequestBody(request) {
         return await request.json();
     } else if (contentType.includes('multipart/form-data')) {
         const formData = await request.formData();
-        const chatRequestJson = formData.get('chat_request_json');
+        let chatRequestJson = formData.get('chat_request_json');
+        
+        // *** START FIX ***
+        // If the named part is not found, check for an unnamed part that contains the JSON.
+        // This handles cases where the client sends the JSON without a proper 'name' attribute.
+        if (!chatRequestJson) {
+            for (const value of formData.values()) {
+                if (typeof value === 'string') {
+                    try {
+                        // Check if the string is a valid JSON object for our chat request
+                        const potentialJson = JSON.parse(value);
+                        if (potentialJson.messages && potentialJson.model) {
+                            chatRequestJson = value;
+                            console.log("Found chat_request_json in an unnamed FormData part.");
+                            break;
+                        }
+                    } catch (e) {
+                        // Not a valid JSON, continue searching
+                    }
+                }
+            }
+        }
+        // *** END FIX ***
+
         if (!chatRequestJson) {
             throw new Error('Bad Request: Missing "chat_request_json" field in form data.');
         }
@@ -52,8 +76,9 @@ export async function parseRequestBody(request) {
         // Attach uploaded files to the request data object
         const uploadedFiles = [];
         for (const [key, value] of formData.entries()) {
-            if (key !== 'chat_request_json' && value instanceof File) {
-                uploadedFiles.push(value);
+            // Also check for files sent without a proper 'name'
+            if (value instanceof File) {
+                 uploadedFiles.push(value);
             }
         }
         if (uploadedFiles.length > 0) {
@@ -64,6 +89,7 @@ export async function parseRequestBody(request) {
         throw new Error(`Unsupported Content-Type: ${contentType}`);
     }
 }
+
 
 /**
  * Generates a unique request ID.

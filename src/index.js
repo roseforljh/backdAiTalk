@@ -43,11 +43,11 @@ export default {
         try {
             // --- Main Router ---
             if (path === '/health') {
-                // *** ADDED VERSION IDENTIFIER FOR DEPLOYMENT VERIFICATION ***
+                // *** UPDATED VERSION IDENTIFIER FOR DEPLOYMENT VERIFICATION ***
                 const healthInfo = {
                     status: 'ok',
-                    version: '2.0.0-refactored', // This confirms the new code is live
-                    message: 'Deployment successful. The /chat endpoint is now active.'
+                    version: '2.1.0-formdata-fix', // This confirms the new fix is live
+                    message: 'Deployment successful. FormData parsing is now more robust.'
                 };
                 response = new Response(JSON.stringify(healthInfo), {
                     status: 200,
