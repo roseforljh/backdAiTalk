@@ -1,0 +1,31 @@
+name = "eztalk-proxy-worker"
+main = "src/index.js"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+name = "eztalk-proxy-worker"
+
+[env.staging]
+name = "eztalk-proxy-worker-staging"
+
+# Environment variables (set these in Cloudflare dashboard or via wrangler secret)
+# OPENAI_API_KEY
+# GEMINI_API_KEY
+# GOOGLE_APPLICATION_CREDENTIALS (for service account JSON)
+
+# KV namespace for caching (optional)
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "your-kv-namespace-id"
+# preview_id = "your-preview-kv-namespace-id"
+
+[build]
+command = "npm run build"
+
+[vars]
+APP_VERSION = "1.0.0"
+LOG_LEVEL = "INFO"
+API_TIMEOUT = "30000"
+READ_TIMEOUT = "25000"
+MAX_CONNECTIONS = "100"

@@ -1,0 +1,25 @@
+{
+  "name": "eztalk-proxy-worker",
+  "version": "1.0.0",
+  "description": "EzTalk Proxy for Cloudflare Workers",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "webpack --mode=production",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging"
+  },
+  "dependencies": {
+    "@google-ai/generativelanguage": "^2.5.0",
+    "@google-cloud/aiplatform": "^3.11.0",
+    "google-auth-library": "^9.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20231218.0",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
