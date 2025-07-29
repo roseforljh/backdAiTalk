@@ -41,7 +41,6 @@ def should_skip_content_chunk(content_str: str, accumulated_content: str) -> boo
     if is_excessive_whitespace(content_str):
         return True
     
-    # 如果内容只是重复的空格或换行符，跳过
     if content_str.strip() == '' and len(content_str) > 5:
         return True
         
