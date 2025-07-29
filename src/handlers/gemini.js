@@ -378,7 +378,7 @@ export class GeminiHandler {
     
     for (const line of lines) {
       if (line.trim() || (cleanedLines.length > 0 && cleanedLines[cleanedLines.length - 1].trim())) {
-        cleanedLines.append(line);
+        cleanedLines.push(line);
       }
     }
 

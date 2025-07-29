@@ -9,11 +9,6 @@
     "deploy": "wrangler deploy",
     "deploy:staging": "wrangler deploy --env staging"
   },
-  "dependencies": {
-    "@google-ai/generativelanguage": "^2.5.0",
-    "@google-cloud/aiplatform": "^3.11.0",
-    "google-auth-library": "^9.4.0"
-  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20231218.0",
     "webpack": "^5.89.0",

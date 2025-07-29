@@ -1,0 +1,92 @@
+# EzTalk Proxy Worker 测试请求
+# 使用 VS Code REST Client 扩展或类似工具测试
+
+### 变量定义
+@baseUrl = https://your-worker-name.your-subdomain.workers.dev
+@openaiKey = your-openai-api-key
+@geminiKey = your-gemini-api-key
+
+### 健康检查
+GET {{baseUrl}}/health
+
+### OpenAI 兼容接口测试
+POST {{baseUrl}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "gpt-3.5-turbo",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello! How are you?"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 100
+}
+
+### 主聊天接口 - OpenAI
+POST {{baseUrl}}/api/v1/chat
+Content-Type: application/json
+
+{
+  "provider": "openai",
+  "model": "gpt-3.5-turbo",
+  "api_key": "{{openaiKey}}",
+  "api_address": "https://api.openai.com/v1/chat/completions",
+  "messages": [
+    {
+      "role": "user",
+      "type": "simple_text_message",
+      "content": "Tell me a joke"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 150
+}
+
+### 主聊天接口 - Gemini
+POST {{baseUrl}}/api/v1/chat
+Content-Type: application/json
+
+{
+  "provider": "gemini",
+  "model": "gemini-pro",
+  "api_key": "{{geminiKey}}",
+  "api_address": "https://generativelanguage.googleapis.com/v1beta",
+  "messages": [
+    {
+      "role": "user",
+      "type": "simple_text_message",
+      "content": "Explain quantum computing in simple terms"
+    }
+  ],
+  "temperature": 0.5
+}
+
+### 多模态请求示例 (需要实际的 base64 图片数据)
+POST {{baseUrl}}/api/v1/chat
+Content-Type: application/json
+
+{
+  "provider": "gemini",
+  "model": "gemini-pro-vision",
+  "api_key": "{{geminiKey}}",
+  "messages": [
+    {
+      "role": "user",
+      "type": "parts_message",
+      "parts": [
+        {
+          "type": "text_content",
+          "text": "What do you see in this image?"
+        },
+        {
+          "type": "inline_data_content",
+          "mime_type": "image/jpeg",
+          "base64_data": "base64-encoded-image-data-here"
+        }
+      ]
+    }
+  ]
+}

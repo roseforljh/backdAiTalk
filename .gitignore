@@ -1,122 +1,15 @@
-__pycache__/
-*.py[cod]
-*$py.class
-
-*.so
-
-.Python
-build/
-develop-eggs/
+# Cloudflare Workers specific
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib60/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+node_modules/
+.wrangler/
 
-*.manifest
-*.spec
-
-pip-log.txt
-pip-delete-this-directory.txt
-
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-*.mo
-*.pot
-
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-instance/
-.webassets-cache
-
-.scrapy
-
-docs/_build/
-
-target/
-
-.ipynb_checkpoints
-
-profile_default/
-ipython_config.py
-
-__pypackages__/
-
-celerybeat-schedule
-celerybeat.pid
-
-*.sage.py
-
+# Environment files
 .env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+.env.local
+.env.production
+.env.staging
 
-.spyderproject
-.spyproject
-
-.ropeproject
-
-/site
-
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-.pyre/
-
-.pytype/
-
-cython_debug/
-
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-*.code-workspace
-
-*.sublime-project
-*.sublime-workspace
-
-.idea/
-
-.project
-.pydevproject
-
-.DS_Store
-
-Thumbs.db
-
-logs/
+# Logs
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -124,11 +17,77 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-temp_document_uploads/
-.vercel/
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
 
-gen-lang-client-0550427988-f31c34047676.json
+# Coverage directory used by tools like istanbul
+coverage/
 
-docker-compose.override.yml
-docker-compose.yaml.local
-docker-compose.yml.local
+# nyc test coverage
+.nyc_output
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# next.js build output
+.next
+
+# nuxt.js build output
+.nuxt
+
+# vuepress build output
+.vuepress/dist
+
+# Serverless directories
+.serverless
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# TernJS port file
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+
+# IDE files
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python files (from original backend - not needed for Workers)
+__pycache__/
+*.py[cod]
+*$py.class

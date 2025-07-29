@@ -18,6 +18,16 @@ if ! command -v wrangler &> /dev/null; then
     exit 1
 fi
 
+# 检查wrangler.toml是否存在
+if [ ! -f "wrangler.toml" ]; then
+    echo "❌ 错误: wrangler.toml 文件不存在"
+    exit 1
+fi
+
+# 运行基本测试
+echo "🧪 运行基本测试..."
+node test-local.js
+
 # 安装依赖
 echo "📦 安装依赖..."
 npm install
@@ -25,6 +35,14 @@ npm install
 # 构建项目
 echo "🔨 构建项目..."
 npm run build
+
+# 检查构建结果
+if [ ! -f "dist/index.js" ]; then
+    echo "❌ 错误: 构建失败，dist/index.js 不存在"
+    exit 1
+fi
+
+echo "✅ 构建成功，文件大小: $(du -h dist/index.js | cut -f1)"
 
 # 检查是否已登录 Cloudflare
 if ! wrangler whoami &> /dev/null; then
@@ -48,10 +66,14 @@ echo "📋 接下来的步骤:"
 echo "1. 在 Cloudflare Dashboard 中设置环境变量:"
 echo "   - OPENAI_API_KEY"
 echo "   - GEMINI_API_KEY"
-echo "   - GOOGLE_APPLICATION_CREDENTIALS (可选)"
 echo ""
 echo "2. 测试部署:"
 echo "   curl https://your-worker.your-subdomain.workers.dev/health"
 echo ""
 echo "3. 查看日志:"
 echo "   wrangler tail"
+echo ""
+echo "4. 测试聊天功能:"
+echo '   curl -X POST https://your-worker.your-subdomain.workers.dev/v1/chat/completions \'
+echo '   -H "Content-Type: application/json" \'
+echo '   -d '"'"'{"model":"gpt-3.5-turbo","messages":[{"role":"user","content":"Hello"}]}'"'"
