@@ -43,7 +43,16 @@ export default {
         try {
             // --- Main Router ---
             if (path === '/health') {
-                response = new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+                // *** ADDED VERSION IDENTIFIER FOR DEPLOYMENT VERIFICATION ***
+                const healthInfo = {
+                    status: 'ok',
+                    version: '2.0.0-refactored', // This confirms the new code is live
+                    message: 'Deployment successful. The /chat endpoint is now active.'
+                };
+                response = new Response(JSON.stringify(healthInfo), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                });
             }
             // *** CORE FIX: Ensure /chat is handled correctly ***
             // Both /chat (for Android client) and /api/v1/chat are routed to the main handler.
@@ -52,13 +61,11 @@ export default {
             }
             // Handle the standard OpenAI compatibility endpoint
             else if (request.method === 'POST' && path === '/v1/chat/completions') {
-                // This endpoint expects a standard OpenAI JSON body
                 const requestData = await request.json();
-                // We need to adapt it to our internal format for the handler
                 const adaptedRequest = {
                     ...requestData,
                     api_key: request.headers.get('Authorization')?.replace('Bearer ', ''),
-                    api_address: 'https://api.openai.com/v1/chat/completions', // Assume default
+                    api_address: 'https://api.openai.com/v1/chat/completions',
                 };
                 response = await handleOpenAIRequest(adaptedRequest, env, crypto.randomUUID());
             }
@@ -87,7 +94,8 @@ export default {
         Object.entries(corsHeaders).forEach(([key, value]) => {
             finalHeaders.set(key, value);
         });
-        finalHeaders.set('Content-Type', 'application/json'); // Ensure content type for error messages
+        // Ensure JSON content type for all responses from this router
+        finalHeaders.set('Content-Type', 'application/json');
 
         return new Response(response.body, {
             status: response.status,
