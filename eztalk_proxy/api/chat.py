@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import List
+from typing import List, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Request, HTTPException, File, UploadFile, Form
@@ -54,15 +54,63 @@ async def get_http_client(request: Request) -> httpx.AsyncClient:
         raise HTTPException(status_code=503, detail="Service unavailable: HTTP client not initialized or closed.")
     return client
 
+async def extract_chat_request_from_form(request: Request) -> tuple[str, List[UploadFile]]:
+    """
+    从 multipart/form-data 请求中提取聊天请求数据
+    兼容各种客户端格式，包括缺少 name 属性的情况
+    """
+    try:
+        form = await request.form()
+        chat_request_json_str = None
+        uploaded_files = []
+        
+        # 首先尝试标准方式获取 chat_request_json
+        if "chat_request_json" in form:
+            chat_request_json_str = form["chat_request_json"]
+        
+        # 如果标准方式失败，尝试从所有字符串值中查找有效的 JSON
+        if not chat_request_json_str:
+            for key, value in form.items():
+                if isinstance(value, str):
+                    try:
+                        # 尝试解析为 JSON 并检查是否包含必要字段
+                        potential_json = orjson.loads(value)
+                        if isinstance(potential_json, dict) and "messages" in potential_json and "model" in potential_json:
+                            chat_request_json_str = value
+                            logger.info(f"Found chat_request_json in form field '{key}' (fallback method)")
+                            break
+                    except (orjson.JSONDecodeError, TypeError):
+                        continue
+        
+        # 收集上传的文件
+        for key, value in form.items():
+            if hasattr(value, 'filename') and hasattr(value, 'file'):  # 这是一个文件
+                uploaded_files.append(value)
+        
+        if not chat_request_json_str:
+            raise HTTPException(status_code=400, detail="Missing 'chat_request_json' field in form data")
+        
+        return chat_request_json_str, uploaded_files
+        
+    except Exception as e:
+        logger.error(f"Error extracting chat request from form: {e}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Failed to parse multipart form data: {e}")
+
 @router.post("/chat", response_class=StreamingResponse, summary="AI聊天完成代理", tags=["AI Proxy"])
 async def chat_proxy_entrypoint(
     fastapi_request_obj: Request,
-    chat_request_json_str: str = Form(..., alias="chat_request_json"),
+    chat_request_json_str: Optional[str] = Form(None, alias="chat_request_json"),
     http_client: httpx.AsyncClient = Depends(get_http_client),
     uploaded_documents: List[UploadFile] = File(default_factory=list)
 ):
     request_id = str(uuid.uuid4())
     log_prefix = f"RID-{request_id}"
+    
+    # 如果标准方式没有获取到 chat_request_json，使用兼容性方法
+    if not chat_request_json_str:
+        logger.info(f"{log_prefix}: Standard form parsing failed, trying compatibility method")
+        chat_request_json_str, uploaded_documents = await extract_chat_request_from_form(fastapi_request_obj)
+    
     logger.info(f"{log_prefix}: Received /chat request with {len(uploaded_documents)} documents.")
 
     try:
