@@ -2,7 +2,7 @@ name: Build and Push to Docker Hub # 工作流的名称，会显示在 GitHub Ac
 
 on: # 定义触发工作流的事件
   push:
-    branches: [ master ] # 当代码被推送到 main 分支时触发 (你可以改成你的主分支名，如 master)
+    branches: [ main ] # 当代码被推送到 main 分支时触发 (你可以改成你的主分支名，如 master)
   # pull_request: # 你也可以在 Pull Request 时触发构建，但不一定推送
   #   branches: [ main ]
 
