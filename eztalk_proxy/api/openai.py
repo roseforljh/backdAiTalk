@@ -476,7 +476,18 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
 
 Please integrate this information naturally into your response without explicitly mentioning the search results."""
                         else:
-                            search_context_content = generate_search_context_message_content(user_query_for_search, search_results)
+                            # 对于非Gemini模型，使用简化的搜索上下文，避免过度限制性的指令
+                            search_context_content = f"""You have access to current web search results for the user's query: "{user_query_for_search}". Use this information to provide accurate, up-to-date responses.
+
+Search Results:
+"""
+                            for i, res in enumerate(search_results):
+                                search_context_content += f"""
+{i + 1}. {res.get('title', 'N/A')}
+   {res.get('snippet', 'N/A')}
+   Source: {res.get('href', 'N/A')}
+"""
+                            search_context_content += "\n\nPlease use this information to answer the user's question comprehensively and accurately."
                         
                         system_message_found = False
                         for msg in final_messages_for_llm:

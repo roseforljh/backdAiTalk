@@ -83,22 +83,42 @@ def cleanup_dirty_markdown(text: str) -> str:
     # 3. Fix table formatting
     text = fix_table_formatting(text)
     
-    # 4. Collapse multiple spaces into a single space, but preserve code indentation and math formulas
+    # 4. Fix duplicate list numbers and markers
+    text = fix_duplicate_list_markers(text)
+    
+    # 5. Clean up consecutive empty lines - keep at most one empty line
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+    
+    # 6. Remove lines that contain only whitespace
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
-        if line.startswith(' ') or '$' in line or '|' in line:
-            cleaned_lines.append(line)  # Preserve formatting for code, math, and tables
-        else:
-            cleaned_lines.append(re.sub(r' +', ' ', line))
+        # Keep the line if it's not just whitespace, or if it's a single empty line between content
+        if line.strip() or (not line.strip() and cleaned_lines and cleaned_lines[-1].strip()):
+            cleaned_lines.append(line)
+    
+    # Remove trailing empty lines
+    while cleaned_lines and not cleaned_lines[-1].strip():
+        cleaned_lines.pop()
+    
     text = '\n'.join(cleaned_lines)
+    
+    # 7. Collapse multiple spaces into a single space, but preserve code indentation and math formulas
+    lines = text.split('\n')
+    final_lines = []
+    for line in lines:
+        if line.startswith(' ') or '$' in line or '|' in line:
+            final_lines.append(line)  # Preserve formatting for code, math, and tables
+        else:
+            final_lines.append(re.sub(r' +', ' ', line))
+    text = '\n'.join(final_lines)
 
-    # 5. Fix spaces around markdown bold/italic markers (but not inside math)
+    # 8. Fix spaces around markdown bold/italic markers (but not inside math)
     if not ('$' in text and text.count('$') % 2 == 0):  # Skip if incomplete math
         text = re.sub(r'\*\*\s+(.*?)\s+\*\*', r'**\1**', text)
         text = re.sub(r'\*\s+(.*?)\s+\*', r'*\1*', text)
 
-    # 6. Fix spaces inside parentheses or brackets (but preserve math formulas)
+    # 9. Fix spaces inside parentheses or brackets (but preserve math formulas)
     text = re.sub(r'\(\s+(.*?)\s+\)', lambda m: f'({m.group(1)})' if '$' not in m.group(0) else m.group(0), text)
     text = re.sub(r'\[\s+(.*?)\s+\]', lambda m: f'[{m.group(1)}]' if '$' not in m.group(0) else m.group(0), text)
     
@@ -231,6 +251,103 @@ def fix_table_lines(table_lines: list) -> list:
 def is_table_separator(line: str) -> bool:
     """Check if line is a table separator"""
     return bool(re.match(r'^\s*\|[\s\-:]+\|\s*$', line))
+
+def fix_duplicate_list_markers(text: str) -> str:
+    """Fix duplicate list markers like '1. 1. 1. content' -> '1. content' and renumber ordered lists"""
+    if not text:
+        return text
+    
+    lines = text.split('\n')
+    
+    # First, clean up duplicate markers
+    cleaned_lines = []
+    for line in lines:
+        cleaned_line = cleanup_duplicate_markers_in_line(line)
+        cleaned_lines.append(cleaned_line)
+    
+    # Then, renumber ordered lists
+    renumbered_lines = renumber_ordered_lists(cleaned_lines)
+    
+    return '\n'.join(renumbered_lines)
+
+def renumber_ordered_lists(lines: list) -> list:
+    """Renumber ordered lists to ensure correct sequential numbering"""
+    result = []
+    # Track numbering for different indent levels
+    indent_counters = {}
+    
+    for line in lines:
+        stripped_line = line.strip()
+        
+        # Check if this is an ordered list item
+        ordered_list_match = re.match(r'^(\d+)\.\s+(.*)$', stripped_line)
+        
+        if ordered_list_match:
+            content = ordered_list_match.group(2)
+            current_indent = len(line) - len(line.lstrip())
+            
+            # Initialize or increment counter for this indent level
+            if current_indent not in indent_counters:
+                indent_counters[current_indent] = 1
+            else:
+                indent_counters[current_indent] += 1
+            
+            # Reset counters for deeper indent levels
+            keys_to_remove = [k for k in indent_counters.keys() if k > current_indent]
+            for k in keys_to_remove:
+                del indent_counters[k]
+            
+            result.append(' ' * current_indent + f"{indent_counters[current_indent]}. {content}")
+        else:
+            # Non-ordered list item
+            if stripped_line and not re.match(r'^[*+-]\s+.*', stripped_line):
+                # Reset all counters when encountering non-list content
+                indent_counters.clear()
+            result.append(line)
+    
+    return result
+
+def cleanup_duplicate_markers_in_line(line: str) -> str:
+    """Clean up duplicate markers in a single line"""
+    if not line.strip():
+        return line
+    
+    # Skip table lines (containing |)
+    if '|' in line:
+        return line
+    
+    # Skip lines that look like table separators
+    if re.match(r'^\s*[\-:]+\s*$', line):
+        return line
+    
+    # Handle duplicate numbered list markers (e.g., "1. 1. 1. content")
+    duplicate_number_pattern = r'^(\s*)(\d+\.\s+)+(\d+\.\s+)(.*)$'
+    match = re.match(duplicate_number_pattern, line)
+    if match:
+        indent = match.group(1)
+        last_number = match.group(3)
+        content = match.group(4)
+        return f"{indent}{last_number}{content}"
+    
+    # Handle duplicate bullet markers (e.g., "- - - content")
+    duplicate_bullet_pattern = r'^(\s*)([*+-]\s+)+([*+-]\s+)(.*)$'
+    match = re.match(duplicate_bullet_pattern, line)
+    if match:
+        indent = match.group(1)
+        bullet = match.group(3)
+        content = match.group(4)
+        return f"{indent}{bullet}{content}"
+    
+    # Handle mixed duplicate markers (e.g., "1. - 1. content")
+    mixed_pattern = r'^(\s*)([\d+\.\s+|[*+-]\s+]+)(\d+\.\s+|[*+-]\s+)(.*)$'
+    match = re.match(mixed_pattern, line)
+    if match:
+        indent = match.group(1)
+        last_marker = match.group(3)
+        content = match.group(4)
+        return f"{indent}{last_marker}{content}"
+    
+    return line
 
 def is_google_official_api(api_address: str) -> bool:
     """Check if the API address is Google's official Gemini API"""
@@ -420,6 +537,7 @@ async def handle_gemini_request(
         upstream_ok = False
         first_chunk_received = False
         full_text = ""
+        original_full_text = ""  # Store original text for comparison
         grounding_supports = []
         grounding_chunks_storage = []
         
@@ -483,12 +601,14 @@ async def handle_gemini_request(
                                     for part in content_parts:
                                         if "text" in part:
                                             text_chunk = part["text"]
-                                            delta["content"] = text_chunk
-                                            full_text += text_chunk
+                                            # Store original text chunk for full_text accumulation
+                                            original_full_text += text_chunk
+                                            # Apply cleanup to the chunk for immediate streaming
+                                            cleaned_chunk = cleanup_dirty_markdown(text_chunk)
+                                            full_text += cleaned_chunk
+                                            delta["content"] = cleaned_chunk
                                     
                                     if delta:
-                                        if "content" in delta and isinstance(delta["content"], str):
-                                            delta["content"] = cleanup_dirty_markdown(delta["content"])
                                         choice = {
                                             "delta": delta,
                                             "finish_reason": candidate.get("finishReason")
@@ -505,6 +625,19 @@ async def handle_gemini_request(
             async for error_event in handle_stream_error(e, request_id, upstream_ok, first_chunk_received):
                 yield error_event
         finally:
+            # Apply final cleanup to the complete text for better markdown and math formula processing
+            if original_full_text:
+                final_cleaned_text = cleanup_dirty_markdown(original_full_text)
+                # Check if the final cleaned text is significantly different from the streamed version
+                if final_cleaned_text.strip() != full_text.strip():
+                    logger.info(f"{log_prefix}: Final cleanup produced different result, sending corrected content")
+                    # Send the properly cleaned complete text as a content event
+                    yield await sse_event_serializer_rest(AppStreamEventPy(
+                        type="content", 
+                        text=f"__GEMINI_FINAL_CLEANUP__\n{final_cleaned_text}", 
+                        timestamp=get_current_time_iso()
+                    ))
+            
             is_native_thinking = bool(gemini_chat_input.generation_config and gemini_chat_input.generation_config.thinking_config)
             use_custom_sep = should_apply_custom_separator_logic(gemini_chat_input, request_id, is_google_like_path=True, is_native_thinking_active=is_native_thinking)
             if grounding_supports and grounding_chunks_storage:
@@ -529,10 +662,10 @@ async def handle_gemini_request(
 
                         if citation_links:
                             citation_string = " " + ", ".join(citation_links)
-                            full_text = full_text[:end_index] + citation_string + full_text[end_index:]
+                            final_cleaned_text = final_cleaned_text[:end_index] + citation_string + final_cleaned_text[end_index:]
                 
                 # Since we cannot re-stream, we will log the result for now.
-                logger.info(f"Text with citations: {full_text}")
+                logger.info(f"Text with citations: {final_cleaned_text}")
 
 
             async for final_event in handle_stream_cleanup(processing_state, request_id, upstream_ok, use_custom_sep, gemini_chat_input.provider):

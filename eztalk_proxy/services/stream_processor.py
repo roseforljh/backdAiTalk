@@ -14,6 +14,39 @@ logger = logging.getLogger("EzTalkProxy.StreamProcessors")
 MIN_REASONING_FLUSH_CHUNK_SIZE = 1
 MIN_CONTENT_FLUSH_CHUNK_SIZE = 20
 
+def is_excessive_whitespace(text: str) -> bool:
+    """
+    检查文本是否只包含过多的空白字符
+    针对OpenAI兼容接口经常产生大量空白段落的问题
+    """
+    if not text:
+        return True
+    
+    # 如果文本只包含空白字符且长度超过10个字符，认为是过多的空白
+    whitespace_only = text.replace('\n', '').replace(' ', '').replace('\t', '')
+    if not whitespace_only and len(text) > 10:
+        return True
+    
+    # 如果连续换行符超过3个，认为是过多的空白
+    if '\n\n\n' in text:
+        return True
+        
+    return False
+
+def should_skip_content_chunk(content_str: str, accumulated_content: str) -> bool:
+    """
+    判断是否应该跳过当前的内容块
+    """
+    # 如果是过多的空白字符，跳过
+    if is_excessive_whitespace(content_str):
+        return True
+    
+    # 如果内容只是重复的空格或换行符，跳过
+    if content_str.strip() == '' and len(content_str) > 5:
+        return True
+        
+    return False
+
 async def process_openai_like_sse_stream(
     parsed_sse_data: Dict[str, Any],
     current_processing_state: Dict[str, Any],
@@ -42,16 +75,20 @@ async def process_openai_like_sse_stream(
                 state["had_any_reasoning"] = True
 
         # Accumulate content and flush when it reaches a certain size
-        if content_chunk:
-            state["accumulated_content"] += str(content_chunk)
-            # If we receive content and haven't sent reasoning_finish, send it now.
-            if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
-                yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
-                state["reasoning_finish_event_sent"] = True
-            
-            if len(state["accumulated_content"]) >= MIN_CONTENT_FLUSH_CHUNK_SIZE:
-                yield {"type": "content", "text": state["accumulated_content"], "timestamp": get_current_time_iso()}
-                state["accumulated_content"] = ""
+        if content_chunk is not None:
+            # Convert to string and check if it's not just None or empty
+            content_str = str(content_chunk)
+            if content_str and not should_skip_content_chunk(content_str, state["accumulated_content"]):
+                state["accumulated_content"] += content_str
+                # If we receive content and haven't sent reasoning_finish, send it now.
+                if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
+                    yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
+                    state["reasoning_finish_event_sent"] = True
+                
+                if len(state["accumulated_content"]) >= MIN_CONTENT_FLUSH_CHUNK_SIZE:
+                    # Send accumulated content (preserve formatting)
+                    yield {"type": "content", "text": state["accumulated_content"], "timestamp": get_current_time_iso()}
+                    state["accumulated_content"] = ""
 
         # Handle tool calls and finish reason
         if tool_calls_chunk or finish_reason:
@@ -124,6 +161,7 @@ async def handle_stream_cleanup(
 
     # Flush any remaining content in the buffer
     if accumulated_content:
+        # Send all remaining content (preserve formatting)
         logger.info(f"{log_prefix}: Cleanup: Flushing remaining content: '{accumulated_content[:100]}...'")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=accumulated_content, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
 
