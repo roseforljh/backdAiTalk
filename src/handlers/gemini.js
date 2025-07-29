@@ -1,496 +1,211 @@
 /**
- * Gemini handler for processing Google AI requests
+ * Gemini handler for processing Google AI requests.
+ * This logic is aligned with `backend-docker/eztalk_proxy/api/gemini.py`.
  */
+import { arrayBufferToBase64 } from '../utils/api_logic.js';
 
-import { logger } from '../utils/logger';
-import { HTTPClient } from '../utils/http';
-
-export class GeminiHandler {
-  constructor() {
-    this.imageMimeTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
-    this.documentMimeTypes = [
-      'application/pdf',
-      'application/x-javascript', 'text/javascript',
-      'application/x-python', 'text/x-python',
-      'text/plain',
-      'text/html',
-      'text/css',
-      'text/md',
-      'text/markdown',
-      'text/csv',
-      'text/xml',
-      'text/rtf'
-    ];
-    this.videoMimeTypes = [
-      'video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/x-flv',
-      'video/x-matroska', 'video/webm', 'video/x-ms-wmv', 'video/3gpp', 'video/x-m4v'
-    ];
-    this.audioMimeTypes = [
-      'audio/wav', 'audio/mpeg', 'audio/aac', 'audio/ogg', 'audio/opus', 'audio/flac', 'audio/3gpp'
-    ];
-  }
-
-  /**
-   * Handle Gemini chat request
-   */
-  async handle(requestData, env, ctx, requestId) {
+/**
+ * Handles requests intended for Google Gemini APIs.
+ * @param {object} requestData The parsed request data from the client.
+ * @param {object} env The Cloudflare environment variables.
+ * @param {string} requestId The unique ID for this request.
+ * @returns {Promise<Response>}
+ */
+export async function handleGeminiRequest(requestData, env, requestId) {
     const logPrefix = `RID-${requestId}`;
-    
+    console.log(`${logPrefix}: Processing with Gemini handler for model ${requestData.model}`);
+
     try {
-      logger.info(`${logPrefix}: Processing Gemini request for model ${requestData.model}`);
+        // 1. Prepare the final payload for the Gemini API
+        const upstreamPayload = await prepareUpstreamPayload(requestData, logPrefix);
 
-      // Initialize HTTP client
-      const httpClient = new HTTPClient(env);
+        // 2. Determine the target URL
+        const targetUrl = buildGeminiApiUrl(requestData);
 
-      // Process uploaded files if any
-      if (requestData.uploadedFiles && requestData.uploadedFiles.length > 0) {
-        await this.processUploadedFiles(requestData, logPrefix);
-      }
+        // 3. Make the API call
+        const response = await fetch(targetUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream',
+                // Note: Gemini REST API uses a query parameter for the key, not a header.
+            },
+            body: JSON.stringify(upstreamPayload),
+        });
 
-      // Prepare the request for Gemini API
-      const geminiRequest = await this.prepareGeminiRequest(requestData, env, logPrefix);
-
-      // Determine API endpoint
-      const apiUrl = this.buildGeminiApiUrl(requestData, env);
-      
-      logger.debug(`${logPrefix}: Making request to ${apiUrl}`);
-
-      const response = await httpClient.post(apiUrl, geminiRequest, {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': requestData.api_key || requestData.apiKey || env.GEMINI_API_KEY
-      });
-
-      // Handle streaming response
-      return this.handleStreamingResponse(response, logPrefix);
+        // 4. Stream the response back to the client
+        if (!response.ok) {
+            const errorBody = await response.text();
+            console.error(`${logPrefix}: Upstream API error ${response.status}: ${errorBody}`);
+            return new Response(JSON.stringify({ error: 'Upstream API Error', message: errorBody }), { status: response.status });
+        }
+        
+        // Gemini stream needs to be transformed into OpenAI SSE format for the client.
+        const transformedStream = transformGeminiStreamToOpenAI(response.body, requestId, requestData.model);
+        return new Response(transformedStream, {
+            status: 200,
+            headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            }
+        });
 
     } catch (error) {
-      logger.error(`${logPrefix}: Gemini handler error:`, error);
-      
-      return new Response(JSON.stringify({
-        error: 'Internal Server Error',
-        message: error.message,
-        request_id: requestId
-      }), {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
+        console.error(`${logPrefix}: Gemini handler error:`, error);
+        return new Response(JSON.stringify({ error: 'Internal Server Error', message: error.message }), { status: 500 });
     }
-  }
+}
 
-  /**
-   * Build Gemini API URL
-   */
-  buildGeminiApiUrl(requestData, env) {
-    const baseUrl = requestData.api_address || requestData.apiAddress || 
-                   'https://generativelanguage.googleapis.com/v1beta';
-    
-    const model = requestData.model || 'gemini-pro';
-    
-    // Handle different Gemini API endpoints
-    if (baseUrl.includes('googleapis.com')) {
-      return `${baseUrl}/models/${model}:streamGenerateContent`;
-    } else {
-      // Custom endpoint
-      return `${baseUrl}/chat/completions`;
-    }
-  }
+/**
+ * Builds the correct Gemini API URL.
+ * @param {object} requestData The request data.
+ * @returns {string} The final API URL.
+ */
+function buildGeminiApiUrl(requestData) {
+    const baseUrl = requestData.api_address || 'https://generativelanguage.googleapis.com';
+    const model = requestData.model;
+    const apiKey = requestData.api_key;
+    return `${baseUrl}/v1beta/models/${model}:streamGenerateContent?key=${apiKey}&alt=sse`;
+}
 
-  /**
-   * Prepare Gemini request format
-   */
-  async prepareGeminiRequest(requestData, env, logPrefix) {
-    const contents = await this.convertMessagesToGeminiFormat(requestData.messages, logPrefix);
-    
-    const request = {
-      contents: contents,
-      generationConfig: {
-        temperature: requestData.temperature,
-        maxOutputTokens: requestData.max_tokens || requestData.maxTokens,
-        topP: requestData.top_p || requestData.topP
-      }
+/**
+ * Prepares the final JSON payload for the Gemini API call.
+ * @param {object} requestData The original request data.
+ * @param {string} logPrefix The logging prefix.
+ * @returns {Promise<object>} The final payload.
+ */
+async function prepareUpstreamPayload(requestData, logPrefix) {
+    const payload = {
+        contents: await convertMessagesToGeminiFormat(requestData, logPrefix),
+        generationConfig: {},
     };
 
-    // Add generation config if provided
-    if (requestData.generation_config || requestData.generationConfig) {
-      Object.assign(request.generationConfig, requestData.generation_config || requestData.generationConfig);
-    }
-
-    // Add tools if provided
-    if (requestData.tools && requestData.tools.length > 0) {
-      request.tools = this.convertToolsToGeminiFormat(requestData.tools);
-    }
-
-    logger.debug(`${logPrefix}: Prepared Gemini request with ${contents.length} content items`);
+    // Map generation config
+    const genConfig = requestData.generation_config || {};
+    if (requestData.temperature !== undefined) genConfig.temperature = requestData.temperature;
+    if (requestData.top_p !== undefined || requestData.topP !== undefined) genConfig.topP = requestData.top_p || requestData.topP;
+    if (requestData.max_tokens !== undefined || requestData.maxTokens !== undefined) genConfig.maxOutputTokens = requestData.max_tokens || requestData.maxTokens;
     
-    return request;
-  }
+    if (Object.keys(genConfig).length > 0) {
+        payload.generationConfig = genConfig;
+    }
 
-  /**
-   * Convert messages to Gemini format
-   */
-  async convertMessagesToGeminiFormat(messages, logPrefix) {
+    // Tools are not yet implemented in this simplified version.
+
+    return payload;
+}
+
+/**
+ * Converts the standard message format to Gemini's `contents` format.
+ * @param {object} requestData The request data containing messages and files.
+ * @param {string} logPrefix The logging prefix.
+ * @returns {Promise<Array<object>>} The `contents` array for the Gemini API.
+ */
+async function convertMessagesToGeminiFormat(requestData, logPrefix) {
     const contents = [];
+    const newMultimodalParts = [];
 
-    for (const message of messages) {
-      const content = {
-        role: this.mapRoleToGemini(message.role),
-        parts: []
-      };
-
-      if (message.type === 'simple_text_message' || message.message_type === 'simple_text_message') {
-        content.parts.push({
-          text: message.content
-        });
-      } else if (message.type === 'parts_message' || message.message_type === 'parts_message') {
-        for (const part of message.parts) {
-          if (part.type === 'text_content') {
-            content.parts.push({
-              text: part.text
+    // Process uploaded files into Gemini parts
+    if (requestData.uploadedFiles && requestData.uploadedFiles.length > 0) {
+        console.log(`${logPrefix}: Processing ${requestData.uploadedFiles.length} files for Gemini format.`);
+        for (const file of requestData.uploadedFiles) {
+            const arrayBuffer = await file.arrayBuffer();
+            const base64Data = arrayBufferToBase64(arrayBuffer);
+            newMultimodalParts.push({
+                inlineData: {
+                    mimeType: file.type,
+                    data: base64Data,
+                }
             });
-          } else if (part.type === 'inline_data_content') {
-            content.parts.push({
-              inlineData: {
-                mimeType: part.mime_type || part.mimeType,
-                data: part.base64_data || part.base64Data
-              }
-            });
-          } else if (part.type === 'file_uri_content') {
-            content.parts.push({
-              fileData: {
-                mimeType: part.mime_type || part.mimeType,
-                fileUri: part.uri
-              }
-            });
-          }
         }
-      }
-
-      if (content.parts.length > 0) {
-        contents.push(content);
-      }
     }
 
-    logger.debug(`${logPrefix}: Converted ${messages.length} messages to ${contents.length} Gemini contents`);
-    return contents;
-  }
-
-  /**
-   * Map role to Gemini format
-   */
-  mapRoleToGemini(role) {
-    const roleMap = {
-      'user': 'user',
-      'assistant': 'model',
-      'system': 'user', // Gemini doesn't have system role, convert to user
-      'function': 'function',
-      'tool': 'function'
-    };
-    return roleMap[role] || 'user';
-  }
-
-  /**
-   * Convert tools to Gemini format
-   */
-  convertToolsToGeminiFormat(tools) {
-    return tools.map(tool => {
-      if (tool.type === 'function') {
-        return {
-          functionDeclarations: [{
-            name: tool.function.name,
-            description: tool.function.description,
-            parameters: tool.function.parameters
-          }]
+    // Process message history
+    for (const msg of requestData.messages) {
+        const content = {
+            role: msg.role === 'assistant' ? 'model' : 'user', // Map roles
+            parts: [],
         };
-      }
-      return tool;
-    });
-  }
 
-  /**
-   * Process uploaded files
-   */
-  async processUploadedFiles(requestData, logPrefix) {
-    logger.info(`${logPrefix}: Processing ${requestData.uploadedFiles.length} uploaded files`);
-
-    for (const file of requestData.uploadedFiles) {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const base64Data = this.arrayBufferToBase64(arrayBuffer);
-        
-        // Add file content to the last user message
-        const lastMessage = requestData.messages[requestData.messages.length - 1];
-        if (lastMessage && lastMessage.role === 'user') {
-          // Convert to parts message if it's not already
-          if (lastMessage.type === 'simple_text_message') {
-            lastMessage.type = 'parts_message';
-            lastMessage.message_type = 'parts_message';
-            lastMessage.parts = [
-              {
-                type: 'text_content',
-                text: lastMessage.content
-              }
-            ];
-            delete lastMessage.content;
-          }
-
-          // Add file part
-          lastMessage.parts.push({
-            type: 'inline_data_content',
-            base64_data: base64Data,
-            mime_type: file.type
-          });
+        if (msg.type === 'simple_text_message' || msg.message_type === 'simple_text_message') {
+            content.parts.push({ text: msg.content });
+        } else if (msg.type === 'parts_message' || msg.message_type === 'parts_message') {
+            for (const part of msg.parts) {
+                if (part.type === 'text_content') {
+                    content.parts.push({ text: part.text });
+                } else if (part.type === 'inline_data_content') {
+                    content.parts.push({
+                        inlineData: {
+                            mimeType: part.mime_type,
+                            data: part.base64_data,
+                        }
+                    });
+                }
+            }
         }
-
-        logger.debug(`${logPrefix}: Processed file ${file.name} (${file.type})`);
-      } catch (error) {
-        logger.error(`${logPrefix}: Error processing file ${file.name}:`, error);
-      }
+        contents.push(content);
     }
-  }
 
-  /**
-   * Handle streaming response from Gemini (matches backend-docker processing)
-   */
-  handleStreamingResponse(response, logPrefix) {
-    const readable = new ReadableStream({
-      async start(controller) {
-        try {
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
+    // Attach new multimodal parts to the last user message
+    const lastUserMessage = contents.slice().reverse().find(c => c.role === 'user');
+    if (lastUserMessage && newMultimodalParts.length > 0) {
+        lastUserMessage.parts.push(...newMultimodalParts);
+    }
 
-          while (true) {
+    return contents;
+}
+
+/**
+ * Transforms a Gemini SSE stream into an OpenAI-compatible SSE stream.
+ * @param {ReadableStream} geminiStream The original stream from the Gemini API.
+ * @param {string} requestId The request ID.
+ * @param {string} model The model name.
+ * @returns {ReadableStream} A new stream with OpenAI-formatted events.
+ */
+function transformGeminiStreamToOpenAI(geminiStream, requestId, model) {
+    const reader = geminiStream.getReader();
+    const decoder = new TextDecoder();
+    
+    return new ReadableStream({
+        async pull(controller) {
             const { done, value } = await reader.read();
-            
             if (done) {
-              break;
+                controller.close();
+                return;
             }
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            
-            // Keep the last incomplete line in buffer
-            buffer = lines.pop() || '';
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
 
             for (const line of lines) {
-              if (line.trim() === '') {
-                controller.enqueue(new TextEncoder().encode('\n'));
-                continue;
-              }
-              
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6).trim();
-                
-                if (data === '[DONE]') {
-                  controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-                  continue;
+                if (line.startsWith('data: ')) {
+                    try {
+                        const jsonStr = line.substring(5).trim();
+                        if (!jsonStr) continue;
+                        
+                        const geminiEvent = JSON.parse(jsonStr);
+                        const text = geminiEvent?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        
+                        if (text) {
+                            const openaiEvent = {
+                                id: `chatcmpl-${requestId}`,
+                                object: 'chat.completion.chunk',
+                                created: Math.floor(Date.now() / 1000),
+                                model: model,
+                                choices: [{
+                                    index: 0,
+                                    delta: { content: text },
+                                    finish_reason: null,
+                                }],
+                            };
+                            controller.enqueue(`data: ${JSON.stringify(openaiEvent)}\n\n`);
+                        }
+                    } catch (e) {
+                        console.error('Error parsing Gemini stream chunk:', e, 'Chunk:', line);
+                    }
                 }
-
-                try {
-                  // Parse Gemini response and convert to OpenAI format
-                  const geminiData = JSON.parse(data);
-                  const openaiData = this.convertGeminiToOpenAIFormat(geminiData, logPrefix);
-                  
-                  // Apply content filtering
-                  if (this.shouldSkipGeminiChunk(openaiData)) {
-                    continue;
-                  }
-                  
-                  const modifiedData = JSON.stringify(openaiData);
-                  controller.enqueue(new TextEncoder().encode(`data: ${modifiedData}\n\n`));
-                } catch (error) {
-                  logger.debug(`${logPrefix}: Failed to parse Gemini SSE data: ${error.message}`);
-                  controller.enqueue(new TextEncoder().encode(`${line}\n`));
-                }
-              } else {
-                controller.enqueue(new TextEncoder().encode(`${line}\n`));
-              }
             }
-          }
-          
-          // Process any remaining buffer
-          if (buffer.trim()) {
-            controller.enqueue(new TextEncoder().encode(`${buffer}\n`));
-          }
-          
-        } catch (error) {
-          logger.error(`${logPrefix}: Gemini streaming error:`, error);
-          controller.error(error);
-        } finally {
-          controller.close();
         }
-      }
     });
-
-    return new Response(readable, {
-      status: response.status,
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-      }
-    });
-  }
-
-  /**
-   * Check if Gemini chunk should be skipped
-   */
-  shouldSkipGeminiChunk(openaiData) {
-    if (!openaiData.choices || !openaiData.choices[0] || !openaiData.choices[0].delta) {
-      return false;
-    }
-    
-    const content = openaiData.choices[0].delta.content;
-    if (!content) {
-      return false;
-    }
-    
-    return this.isExcessiveWhitespace(content);
-  }
-
-  /**
-   * Check if text contains excessive whitespace
-   */
-  isExcessiveWhitespace(text) {
-    if (!text) return true;
-    
-    const whitespaceOnly = text.replace(/\n/g, '').replace(/ /g, '').replace(/\t/g, '');
-    if (!whitespaceOnly && text.length > 10) {
-      return true;
-    }
-    
-    if (text.includes('\n\n\n')) {
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Convert Gemini response to OpenAI format (matches backend-docker conversion)
-   */
-  convertGeminiToOpenAIFormat(geminiData, logPrefix) {
-    try {
-      // Handle Gemini streaming response format
-      if (geminiData.candidates && geminiData.candidates.length > 0) {
-        const candidate = geminiData.candidates[0];
-        
-        if (candidate.content && candidate.content.parts) {
-          const text = candidate.content.parts
-            .filter(part => part.text)
-            .map(part => part.text)
-            .join('');
-
-          // Map finish reasons
-          let finishReason = null;
-          if (candidate.finishReason) {
-            const reasonMap = {
-              'STOP': 'stop',
-              'MAX_TOKENS': 'length',
-              'SAFETY': 'content_filter',
-              'RECITATION': 'content_filter',
-              'OTHER': 'stop'
-            };
-            finishReason = reasonMap[candidate.finishReason] || 'stop';
-          }
-
-          return {
-            id: `chatcmpl-gemini-${Date.now()}`,
-            object: 'chat.completion.chunk',
-            created: Math.floor(Date.now() / 1000),
-            model: 'gemini-pro',
-            choices: [{
-              index: 0,
-              delta: {
-                content: text || ''
-              },
-              finish_reason: finishReason
-            }],
-            _source: 'gemini',
-            _request_id: logPrefix
-          };
-        }
-      }
-
-      // Handle error responses
-      if (geminiData.error) {
-        logger.warn(`${logPrefix}: Gemini API error: ${geminiData.error.message}`);
-        return {
-          id: `chatcmpl-error-${Date.now()}`,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: 'gemini-pro',
-          choices: [{
-            index: 0,
-            delta: {},
-            finish_reason: 'stop'
-          }],
-          error: geminiData.error
-        };
-      }
-
-      // Return minimal valid OpenAI format for unknown responses
-      return {
-        id: `chatcmpl-unknown-${Date.now()}`,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: 'gemini-pro',
-        choices: [{
-          index: 0,
-          delta: {},
-          finish_reason: null
-        }]
-      };
-
-    } catch (error) {
-      logger.error(`${logPrefix}: Error converting Gemini response:`, error);
-      return geminiData; // Return original data if conversion fails
-    }
-  }
-
-  /**
-   * Utility functions
-   */
-  arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
-  cleanupMarkdown(text) {
-    if (typeof text !== 'string') {
-      return '';
-    }
-
-    // Replace escaped newlines with actual newlines
-    text = text.replace(/\\n/g, '\n');
-
-    // Clean up consecutive empty lines
-    text = text.replace(/\n\s*\n\s*\n+/g, '\n\n');
-
-    // Remove lines that contain only whitespace
-    const lines = text.split('\n');
-    const cleanedLines = [];
-    
-    for (const line of lines) {
-      if (line.trim() || (cleanedLines.length > 0 && cleanedLines[cleanedLines.length - 1].trim())) {
-        cleanedLines.push(line);
-      }
-    }
-
-    // Remove trailing empty lines
-    while (cleanedLines.length > 0 && !cleanedLines[cleanedLines.length - 1].trim()) {
-      cleanedLines.pop();
-    }
-
-    return cleanedLines.join('\n');
-  }
 }

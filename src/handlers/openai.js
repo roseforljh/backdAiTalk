@@ -1,401 +1,180 @@
 /**
- * OpenAI compatible handler for processing chat requests
+ * OpenAI compatible handler for processing chat requests.
+ * This logic is aligned with `backend-docker/eztalk_proxy/api/openai.py`.
  */
+import { arrayBufferToBase64 } from '../utils/api_logic.js';
 
-import { logger } from '../utils/logger';
-import { HTTPClient } from '../utils/http';
+// Supported MIME types, aligned with the Python version
+const SUPPORTED_IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const AUDIO_MIME_TYPES = [
+    "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3", "audio/aac", "audio/ogg",
+    "audio/opus", "audio/flac", "audio/3gpp", "audio/amr", "audio/aiff", "audio/x-m4a"
+];
+const VIDEO_MIME_TYPES = [
+    "video/mp4", "video/mpeg", "video/quicktime", "video/x-msvideo", "video/x-flv",
+    "video/x-matroska", "video/webm", "video/x-ms-wmv", "video/3gpp", "video/x-m4v"
+];
 
-export class OpenAIHandler {
-  constructor() {
-    this.supportedImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-    this.audioMimeTypes = [
-      'audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/mp3', 'audio/aac', 'audio/ogg',
-      'audio/opus', 'audio/flac', 'audio/3gpp', 'audio/amr', 'audio/aiff', 'audio/x-m4a',
-      'audio/midi', 'audio/webm'
-    ];
-    this.videoMimeTypes = [
-      'video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 'video/x-flv',
-      'video/x-matroska', 'video/webm', 'video/x-ms-wmv', 'video/3gpp', 'video/x-m4v'
-    ];
-  }
-
-  /**
-   * Handle OpenAI compatible chat request
-   */
-  async handle(requestData, env, ctx, requestId) {
+/**
+ * Handles requests intended for OpenAI-compatible APIs.
+ * @param {object} requestData The parsed request data from the client.
+ * @param {object} env The Cloudflare environment variables.
+ * @param {string} requestId The unique ID for this request.
+ * @returns {Promise<Response>}
+ */
+export async function handleOpenAIRequest(requestData, env, requestId) {
     const logPrefix = `RID-${requestId}`;
-    
+    console.log(`${logPrefix}: Processing with OpenAI compatible handler for model ${requestData.model}`);
+
     try {
-      logger.info(`${logPrefix}: Processing OpenAI compatible request for model ${requestData.model}`);
+        // 1. Process messages and uploaded files to create the final message list
+        const finalMessages = await processMessagesAndFiles(requestData, logPrefix);
 
-      // Initialize HTTP client
-      const httpClient = new HTTPClient(env);
+        // 2. Prepare the final payload for the upstream API
+        const upstreamPayload = prepareUpstreamPayload(requestData, finalMessages);
 
-      // Process uploaded files if any
-      if (requestData.uploadedFiles && requestData.uploadedFiles.length > 0) {
-        await this.processUploadedFiles(requestData, logPrefix);
-      }
+        // 3. Determine the target URL
+        const targetUrl = requestData.api_address || 'https://api.openai.com/v1/chat/completions';
 
-      // Prepare the request for the upstream API
-      const upstreamRequest = await this.prepareOpenAIRequest(requestData, env, logPrefix);
-
-      // Make the request to upstream API
-      const apiUrl = requestData.api_address || requestData.apiAddress || 'https://api.openai.com/v1/chat/completions';
-      
-      logger.debug(`${logPrefix}: Making request to ${apiUrl}`);
-
-      const response = await httpClient.post(apiUrl, upstreamRequest, {
-        'Authorization': `Bearer ${requestData.api_key || requestData.apiKey}`,
-        'Content-Type': 'application/json'
-      });
-
-      // Handle streaming response
-      if (upstreamRequest.stream) {
-        return this.handleStreamingResponse(response, logPrefix);
-      } else {
-        // Handle non-streaming response
-        const responseData = await response.json();
-        return new Response(JSON.stringify(responseData), {
-          status: response.status,
-          headers: {
-            'Content-Type': 'application/json'
-          }
+        // 4. Make the API call
+        const response = await fetch(targetUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${requestData.api_key}`,
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream',
+            },
+            body: JSON.stringify(upstreamPayload),
         });
-      }
+
+        // 5. Stream the response back to the client
+        if (!response.ok) {
+            const errorBody = await response.text();
+            console.error(`${logPrefix}: Upstream API error ${response.status}: ${errorBody}`);
+            return new Response(JSON.stringify({ error: 'Upstream API Error', message: errorBody }), { status: response.status });
+        }
+
+        return new Response(response.body, {
+            status: response.status,
+            headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            }
+        });
 
     } catch (error) {
-      logger.error(`${logPrefix}: OpenAI handler error:`, error);
-      
-      return new Response(JSON.stringify({
-        error: 'Internal Server Error',
-        message: error.message,
-        request_id: requestId
-      }), {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json'
+        console.error(`${logPrefix}: OpenAI handler error:`, error);
+        return new Response(JSON.stringify({ error: 'Internal Server Error', message: error.message }), { status: 500 });
+    }
+}
+
+/**
+ * Processes messages and integrates uploaded files, converting them to the OpenAI-compatible format.
+ * @param {object} requestData The request data.
+ * @param {string} logPrefix The logging prefix.
+ * @returns {Promise<Array<object>>} The final list of messages for the API.
+ */
+async function processMessagesAndFiles(requestData, logPrefix) {
+    const finalMessages = [];
+    const newMultimodalParts = [];
+
+    // Process uploaded files first
+    if (requestData.uploadedFiles && requestData.uploadedFiles.length > 0) {
+        console.log(`${logPrefix}: Processing ${requestData.uploadedFiles.length} uploaded files.`);
+        for (const file of requestData.uploadedFiles) {
+            const arrayBuffer = await file.arrayBuffer();
+            const base64Data = arrayBufferToBase64(arrayBuffer);
+            const mimeType = file.type.toLowerCase();
+
+            if (SUPPORTED_IMAGE_MIME_TYPES.includes(mimeType)) {
+                newMultimodalParts.push({
+                    type: 'image_url',
+                    image_url: { url: `data:${mimeType};base64,${base64Data}` }
+                });
+            } else if (AUDIO_MIME_TYPES.includes(mimeType)) {
+                newMultimodalParts.push({
+                    type: 'input_audio', // Custom type for Gemini compatibility
+                    input_audio: { data: base64Data, format: mimeType.split('/')[1] }
+                });
+            } else if (VIDEO_MIME_TYPES.includes(mimeType)) {
+                 newMultimodalParts.push({
+                    type: 'image_url', // Videos are sent as data URIs in image_url for Gemini OpenAI compat
+                    image_url: { url: `data:${mimeType};base64,${base64Data}` }
+                });
+            } else {
+                console.warn(`${logPrefix}: Skipping unsupported file type: ${mimeType}`);
+            }
         }
-      });
-    }
-  }
-
-  /**
-   * Prepare OpenAI compatible request
-   */
-  async prepareOpenAIRequest(requestData, env, logPrefix) {
-    const request = {
-      model: requestData.model,
-      messages: await this.processMessages(requestData.messages, logPrefix),
-      stream: true, // Default to streaming
-      temperature: requestData.temperature,
-      max_tokens: requestData.max_tokens || requestData.maxTokens,
-      top_p: requestData.top_p || requestData.topP
-    };
-
-    // Add tools if provided
-    if (requestData.tools && requestData.tools.length > 0) {
-      request.tools = requestData.tools;
-      if (requestData.tool_choice || requestData.toolChoice) {
-        request.tool_choice = requestData.tool_choice || requestData.toolChoice;
-      }
     }
 
-    // Add custom parameters if provided
-    if (requestData.custom_extra_body || requestData.customExtraBody) {
-      Object.assign(request, requestData.custom_extra_body || requestData.customExtraBody);
+    // Process message history
+    for (const msg of requestData.messages) {
+        const messagePayload = { role: msg.role };
+        let contentParts = [];
+
+        if (msg.type === 'simple_text_message' || msg.message_type === 'simple_text_message') {
+            contentParts.push({ type: 'text', text: msg.content });
+        } else if (msg.type === 'parts_message' || msg.message_type === 'parts_message') {
+            for (const part of msg.parts) {
+                if (part.type === 'text_content') {
+                    contentParts.push({ type: 'text', text: part.text });
+                } else if (part.type === 'inline_data_content') {
+                     contentParts.push({
+                        type: 'image_url',
+                        image_url: { url: `data:${part.mime_type};base64,${part.base64_data}` }
+                    });
+                }
+            }
+        }
+        messagePayload.content = contentParts;
+        finalMessages.push(messagePayload);
     }
 
-    logger.debug(`${logPrefix}: Prepared OpenAI request with ${request.messages.length} messages`);
+    // Attach new multimodal parts to the last user message
+    const lastUserMessage = finalMessages.slice().reverse().find(m => m.role === 'user');
+    if (lastUserMessage && newMultimodalParts.length > 0) {
+        if (!Array.isArray(lastUserMessage.content)) {
+             lastUserMessage.content = [{ type: 'text', text: lastUserMessage.content || '' }];
+        }
+        lastUserMessage.content.push(...newMultimodalParts);
+    }
     
-    return request;
-  }
-
-  /**
-   * Process messages for OpenAI format
-   */
-  async processMessages(messages, logPrefix) {
-    const processedMessages = [];
-
-    for (const message of messages) {
-      if (message.type === 'simple_text_message' || message.message_type === 'simple_text_message') {
-        processedMessages.push({
-          role: message.role,
-          content: message.content
-        });
-      } else if (message.type === 'parts_message' || message.message_type === 'parts_message') {
-        // Handle multimodal messages
-        const content = [];
-        
-        for (const part of message.parts) {
-          if (part.type === 'text_content') {
-            content.push({
-              type: 'text',
-              text: part.text
-            });
-          } else if (part.type === 'inline_data_content') {
-            if (this.supportedImageTypes.includes(part.mime_type || part.mimeType)) {
-              content.push({
-                type: 'image_url',
-                image_url: {
-                  url: `data:${part.mime_type || part.mimeType};base64,${part.base64_data || part.base64Data}`
-                }
-              });
-            }
-          } else if (part.type === 'input_audio_content') {
-            // Handle audio content for models that support it
-            content.push({
-              type: 'input_audio',
-              input_audio: {
-                data: part.data,
-                format: part.format
-              }
-            });
-          }
+    // Simplify content field if possible
+    finalMessages.forEach(msg => {
+        if (Array.isArray(msg.content) && msg.content.length === 1 && msg.content[0].type === 'text') {
+            msg.content = msg.content[0].text;
         }
-
-        processedMessages.push({
-          role: message.role,
-          content: content.length === 1 && content[0].type === 'text' ? content[0].text : content
-        });
-      }
-    }
-
-    logger.debug(`${logPrefix}: Processed ${processedMessages.length} messages`);
-    return processedMessages;
-  }
-
-  /**
-   * Process uploaded files
-   */
-  async processUploadedFiles(requestData, logPrefix) {
-    logger.info(`${logPrefix}: Processing ${requestData.uploadedFiles.length} uploaded files`);
-
-    for (const file of requestData.uploadedFiles) {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const base64Data = this.arrayBufferToBase64(arrayBuffer);
-        
-        // Add file content to the last user message
-        const lastMessage = requestData.messages[requestData.messages.length - 1];
-        if (lastMessage && lastMessage.role === 'user') {
-          // Convert to parts message if it's not already
-          if (lastMessage.type === 'simple_text_message') {
-            lastMessage.type = 'parts_message';
-            lastMessage.message_type = 'parts_message';
-            lastMessage.parts = [
-              {
-                type: 'text_content',
-                text: lastMessage.content
-              }
-            ];
-            delete lastMessage.content;
-          }
-
-          // Add file part
-          if (this.supportedImageTypes.includes(file.type)) {
-            lastMessage.parts.push({
-              type: 'inline_data_content',
-              base64_data: base64Data,
-              mime_type: file.type
-            });
-          } else if (this.audioMimeTypes.includes(file.type)) {
-            lastMessage.parts.push({
-              type: 'input_audio_content',
-              data: base64Data,
-              format: this.getAudioFormatFromMimeType(file.type)
-            });
-          }
-        }
-
-        logger.debug(`${logPrefix}: Processed file ${file.name} (${file.type})`);
-      } catch (error) {
-        logger.error(`${logPrefix}: Error processing file ${file.name}:`, error);
-      }
-    }
-  }
-
-  /**
-   * Handle streaming response (matches backend-docker stream processing)
-   */
-  handleStreamingResponse(response, logPrefix) {
-    const readable = new ReadableStream({
-      async start(controller) {
-        try {
-          const reader = response.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-
-          while (true) {
-            const { done, value } = await reader.read();
-            
-            if (done) {
-              break;
-            }
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            
-            // Keep the last incomplete line in buffer
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-              if (line.trim() === '') {
-                controller.enqueue(new TextEncoder().encode('\n'));
-                continue;
-              }
-              
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6).trim();
-                
-                if (data === '[DONE]') {
-                  controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-                  continue;
-                }
-
-                try {
-                  // Parse and process the SSE data (matching backend-docker logic)
-                  const parsed = JSON.parse(data);
-                  
-                  // Apply content filtering (matching backend-docker)
-                  if (this.shouldSkipContentChunk(parsed)) {
-                    continue;
-                  }
-                  
-                  const processedData = this.processStreamChunk(parsed, logPrefix);
-                  const modifiedData = JSON.stringify(processedData);
-                  controller.enqueue(new TextEncoder().encode(`data: ${modifiedData}\n\n`));
-                } catch (error) {
-                  // If parsing fails, pass through as-is (but log the error)
-                  logger.debug(`${logPrefix}: Failed to parse SSE data: ${error.message}`);
-                  controller.enqueue(new TextEncoder().encode(`${line}\n`));
-                }
-              } else {
-                controller.enqueue(new TextEncoder().encode(`${line}\n`));
-              }
-            }
-          }
-          
-          // Process any remaining buffer
-          if (buffer.trim()) {
-            controller.enqueue(new TextEncoder().encode(`${buffer}\n`));
-          }
-          
-        } catch (error) {
-          logger.error(`${logPrefix}: Streaming error:`, error);
-          controller.error(error);
-        } finally {
-          controller.close();
-        }
-      }
     });
 
-    return new Response(readable, {
-      status: response.status,
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
-      }
-    });
-  }
+    return finalMessages;
+}
 
-  /**
-   * Check if content chunk should be skipped (matches backend-docker logic)
-   */
-  shouldSkipContentChunk(parsed) {
-    if (!parsed.choices || !parsed.choices[0] || !parsed.choices[0].delta) {
-      return false;
-    }
-    
-    const content = parsed.choices[0].delta.content;
-    if (!content) {
-      return false;
-    }
-    
-    // Skip excessive whitespace (matching backend-docker logic)
-    if (this.isExcessiveWhitespace(content)) {
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Check if text contains excessive whitespace
-   */
-  isExcessiveWhitespace(text) {
-    if (!text) return true;
-    
-    // If text only contains whitespace and is longer than 10 characters
-    const whitespaceOnly = text.replace(/\n/g, '').replace(/ /g, '').replace(/\t/g, '');
-    if (!whitespaceOnly && text.length > 10) {
-      return true;
-    }
-    
-    // If contains more than 3 consecutive newlines
-    if (text.includes('\n\n\n')) {
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Process individual stream chunk
-   */
-  processStreamChunk(parsed, logPrefix) {
-    // Add timestamp and request ID for debugging
-    if (parsed.choices && parsed.choices[0]) {
-      parsed.choices[0]._debug = {
-        timestamp: new Date().toISOString(),
-        request_id: logPrefix
-      };
-    }
-    
-    return parsed;
-  }
-
-  /**
-   * Utility functions
-   */
-  arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
-  getAudioFormatFromMimeType(mimeType) {
-    const mimeToFormat = {
-      'audio/wav': 'wav',
-      'audio/x-wav': 'wav',
-      'audio/mpeg': 'mp3',
-      'audio/mp3': 'mp3',
-      'audio/aac': 'aac',
-      'audio/ogg': 'ogg',
-      'audio/opus': 'opus',
-      'audio/flac': 'flac',
-      'audio/3gpp': '3gp',
-      'audio/amr': 'amr',
-      'audio/aiff': 'aiff',
-      'audio/x-m4a': 'm4a',
-      'audio/midi': 'midi',
-      'audio/webm': 'webm'
+/**
+ * Prepares the final JSON payload for the upstream API call.
+ * @param {object} requestData The original request data.
+ * @param {Array<object>} finalMessages The processed messages.
+ * @returns {object} The final payload.
+ */
+function prepareUpstreamPayload(requestData, finalMessages) {
+    const payload = {
+        model: requestData.model,
+        messages: finalMessages,
+        stream: true,
     };
-    return mimeToFormat[mimeType.toLowerCase()] || mimeType.split('/')[1];
-  }
 
-  isGeminiModel(modelName) {
-    return modelName && modelName.toLowerCase().includes('gemini');
-  }
+    // Add optional parameters
+    const optionalParams = ['temperature', 'top_p', 'max_tokens', 'tools', 'tool_choice'];
+    optionalParams.forEach(param => {
+        if (requestData[param] !== undefined && requestData[param] !== null) {
+            payload[param] = requestData[param];
+        }
+    });
+    
+    // Handle aliased names
+    if (requestData.maxTokens) payload.max_tokens = requestData.maxTokens;
+    if (requestData.topP) payload.top_p = requestData.topP;
+    if (requestData.toolChoice) payload.tool_choice = requestData.toolChoice;
 
-  supportsMultimodalContent(modelName) {
-    return this.isGeminiModel(modelName) || 
-           (modelName && (modelName.includes('gpt-4') || modelName.includes('claude')));
-  }
+    return payload;
 }
