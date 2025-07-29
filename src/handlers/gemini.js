@@ -251,7 +251,7 @@ export class GeminiHandler {
   }
 
   /**
-   * Handle streaming response from Gemini
+   * Handle streaming response from Gemini (matches backend-docker processing)
    */
   handleStreamingResponse(response, logPrefix) {
     const readable = new ReadableStream({
@@ -259,6 +259,7 @@ export class GeminiHandler {
         try {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
+          let buffer = '';
 
           while (true) {
             const { done, value } = await reader.read();
@@ -267,14 +268,20 @@ export class GeminiHandler {
               break;
             }
 
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            
+            // Keep the last incomplete line in buffer
+            buffer = lines.pop() || '';
 
             for (const line of lines) {
-              if (line.trim() === '') continue;
+              if (line.trim() === '') {
+                controller.enqueue(new TextEncoder().encode('\n'));
+                continue;
+              }
               
               if (line.startsWith('data: ')) {
-                const data = line.slice(6);
+                const data = line.slice(6).trim();
                 
                 if (data === '[DONE]') {
                   controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
@@ -284,11 +291,17 @@ export class GeminiHandler {
                 try {
                   // Parse Gemini response and convert to OpenAI format
                   const geminiData = JSON.parse(data);
-                  const openaiData = this.convertGeminiToOpenAIFormat(geminiData);
+                  const openaiData = this.convertGeminiToOpenAIFormat(geminiData, logPrefix);
+                  
+                  // Apply content filtering
+                  if (this.shouldSkipGeminiChunk(openaiData)) {
+                    continue;
+                  }
+                  
                   const modifiedData = JSON.stringify(openaiData);
                   controller.enqueue(new TextEncoder().encode(`data: ${modifiedData}\n\n`));
                 } catch (error) {
-                  // If parsing fails, pass through as-is
+                  logger.debug(`${logPrefix}: Failed to parse Gemini SSE data: ${error.message}`);
                   controller.enqueue(new TextEncoder().encode(`${line}\n`));
                 }
               } else {
@@ -296,8 +309,14 @@ export class GeminiHandler {
               }
             }
           }
+          
+          // Process any remaining buffer
+          if (buffer.trim()) {
+            controller.enqueue(new TextEncoder().encode(`${buffer}\n`));
+          }
+          
         } catch (error) {
-          logger.error(`${logPrefix}: Streaming error:`, error);
+          logger.error(`${logPrefix}: Gemini streaming error:`, error);
           controller.error(error);
         } finally {
           controller.close();
@@ -310,43 +329,128 @@ export class GeminiHandler {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       }
     });
   }
 
   /**
-   * Convert Gemini response to OpenAI format
+   * Check if Gemini chunk should be skipped
    */
-  convertGeminiToOpenAIFormat(geminiData) {
-    // Basic conversion from Gemini streaming format to OpenAI format
-    if (geminiData.candidates && geminiData.candidates.length > 0) {
-      const candidate = geminiData.candidates[0];
-      
-      if (candidate.content && candidate.content.parts) {
-        const text = candidate.content.parts
-          .filter(part => part.text)
-          .map(part => part.text)
-          .join('');
+  shouldSkipGeminiChunk(openaiData) {
+    if (!openaiData.choices || !openaiData.choices[0] || !openaiData.choices[0].delta) {
+      return false;
+    }
+    
+    const content = openaiData.choices[0].delta.content;
+    if (!content) {
+      return false;
+    }
+    
+    return this.isExcessiveWhitespace(content);
+  }
 
+  /**
+   * Check if text contains excessive whitespace
+   */
+  isExcessiveWhitespace(text) {
+    if (!text) return true;
+    
+    const whitespaceOnly = text.replace(/\n/g, '').replace(/ /g, '').replace(/\t/g, '');
+    if (!whitespaceOnly && text.length > 10) {
+      return true;
+    }
+    
+    if (text.includes('\n\n\n')) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Convert Gemini response to OpenAI format (matches backend-docker conversion)
+   */
+  convertGeminiToOpenAIFormat(geminiData, logPrefix) {
+    try {
+      // Handle Gemini streaming response format
+      if (geminiData.candidates && geminiData.candidates.length > 0) {
+        const candidate = geminiData.candidates[0];
+        
+        if (candidate.content && candidate.content.parts) {
+          const text = candidate.content.parts
+            .filter(part => part.text)
+            .map(part => part.text)
+            .join('');
+
+          // Map finish reasons
+          let finishReason = null;
+          if (candidate.finishReason) {
+            const reasonMap = {
+              'STOP': 'stop',
+              'MAX_TOKENS': 'length',
+              'SAFETY': 'content_filter',
+              'RECITATION': 'content_filter',
+              'OTHER': 'stop'
+            };
+            finishReason = reasonMap[candidate.finishReason] || 'stop';
+          }
+
+          return {
+            id: `chatcmpl-gemini-${Date.now()}`,
+            object: 'chat.completion.chunk',
+            created: Math.floor(Date.now() / 1000),
+            model: 'gemini-pro',
+            choices: [{
+              index: 0,
+              delta: {
+                content: text || ''
+              },
+              finish_reason: finishReason
+            }],
+            _source: 'gemini',
+            _request_id: logPrefix
+          };
+        }
+      }
+
+      // Handle error responses
+      if (geminiData.error) {
+        logger.warn(`${logPrefix}: Gemini API error: ${geminiData.error.message}`);
         return {
-          id: `chatcmpl-${Date.now()}`,
+          id: `chatcmpl-error-${Date.now()}`,
           object: 'chat.completion.chunk',
           created: Math.floor(Date.now() / 1000),
           model: 'gemini-pro',
           choices: [{
             index: 0,
-            delta: {
-              content: text
-            },
-            finish_reason: candidate.finishReason === 'STOP' ? 'stop' : null
-          }]
+            delta: {},
+            finish_reason: 'stop'
+          }],
+          error: geminiData.error
         };
       }
-    }
 
-    // Return original data if conversion fails
-    return geminiData;
+      // Return minimal valid OpenAI format for unknown responses
+      return {
+        id: `chatcmpl-unknown-${Date.now()}`,
+        object: 'chat.completion.chunk',
+        created: Math.floor(Date.now() / 1000),
+        model: 'gemini-pro',
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: null
+        }]
+      };
+
+    } catch (error) {
+      logger.error(`${logPrefix}: Error converting Gemini response:`, error);
+      return geminiData; // Return original data if conversion fails
+    }
   }
 
   /**

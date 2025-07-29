@@ -6,6 +6,7 @@ import { logger } from '../utils/logger';
 import { HTTPClient } from '../utils/http';
 import { OpenAIHandler } from './openai';
 import { GeminiHandler } from './gemini';
+import { WebSearchService } from '../services/web-search';
 
 export class ChatHandler {
   constructor() {
@@ -37,6 +38,14 @@ export class ChatHandler {
       const requestId = this.generateRequestId();
       
       logger.info(`RID-${requestId}: Received chat request for provider '${requestData.provider}' and model '${requestData.model}'`);
+
+      // Initialize web search service
+      const webSearchService = new WebSearchService(env);
+
+      // Perform web search if needed
+      if (webSearchService.shouldPerformWebSearch(requestData)) {
+        await this.performWebSearchAndUpdateMessages(requestData, webSearchService, requestId);
+      }
 
       // Determine which handler to use based on API address
       const useGeminiFormat = this.isGoogleOfficialAPI(requestData.api_address || requestData.apiAddress);
@@ -210,6 +219,65 @@ export class ChatHandler {
       tools: openaiRequest.tools,
       tool_choice: openaiRequest.tool_choice
     };
+  }
+
+  /**
+   * Perform web search and update messages
+   */
+  async performWebSearchAndUpdateMessages(requestData, webSearchService, requestId) {
+    const logPrefix = `RID-${requestId}`;
+    
+    try {
+      // Extract search query from the last user message
+      const lastMessage = requestData.messages[requestData.messages.length - 1];
+      if (!lastMessage || lastMessage.role !== 'user') {
+        return;
+      }
+
+      const searchQuery = lastMessage.content || 
+                         (lastMessage.parts && lastMessage.parts.find(p => p.type === 'text_content')?.text) || '';
+
+      if (!searchQuery.trim()) {
+        return;
+      }
+
+      logger.info(`${logPrefix}: Performing web search for query: "${searchQuery.substring(0, 100)}"`);
+
+      // Perform web search
+      const searchResults = await webSearchService.performWebSearch(searchQuery, requestId);
+
+      if (searchResults.length > 0) {
+        // Generate search context
+        const searchContext = webSearchService.generateSearchContextMessageContent(
+          searchResults, 
+          searchQuery, 
+          requestId
+        );
+
+        // Add search context to the user message
+        if (lastMessage.type === 'simple_text_message') {
+          lastMessage.content = searchContext + lastMessage.content;
+        } else if (lastMessage.type === 'parts_message') {
+          // Find text part and prepend search context
+          const textPart = lastMessage.parts.find(p => p.type === 'text_content');
+          if (textPart) {
+            textPart.text = searchContext + textPart.text;
+          } else {
+            // Add search context as first part
+            lastMessage.parts.unshift({
+              type: 'text_content',
+              text: searchContext
+            });
+          }
+        }
+
+        logger.info(`${logPrefix}: Added ${searchResults.length} search results to message context`);
+      }
+
+    } catch (error) {
+      logger.error(`${logPrefix}: Web search error:`, error);
+      // Continue without web search if it fails
+    }
   }
 
   /**

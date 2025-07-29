@@ -215,7 +215,7 @@ export class OpenAIHandler {
   }
 
   /**
-   * Handle streaming response
+   * Handle streaming response (matches backend-docker stream processing)
    */
   handleStreamingResponse(response, logPrefix) {
     const readable = new ReadableStream({
@@ -223,6 +223,7 @@ export class OpenAIHandler {
         try {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
+          let buffer = '';
 
           while (true) {
             const { done, value } = await reader.read();
@@ -231,14 +232,20 @@ export class OpenAIHandler {
               break;
             }
 
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            
+            // Keep the last incomplete line in buffer
+            buffer = lines.pop() || '';
 
             for (const line of lines) {
-              if (line.trim() === '') continue;
+              if (line.trim() === '') {
+                controller.enqueue(new TextEncoder().encode('\n'));
+                continue;
+              }
               
               if (line.startsWith('data: ')) {
-                const data = line.slice(6);
+                const data = line.slice(6).trim();
                 
                 if (data === '[DONE]') {
                   controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
@@ -246,12 +253,20 @@ export class OpenAIHandler {
                 }
 
                 try {
-                  // Parse and potentially modify the SSE data
+                  // Parse and process the SSE data (matching backend-docker logic)
                   const parsed = JSON.parse(data);
-                  const modifiedData = JSON.stringify(parsed);
+                  
+                  // Apply content filtering (matching backend-docker)
+                  if (this.shouldSkipContentChunk(parsed)) {
+                    continue;
+                  }
+                  
+                  const processedData = this.processStreamChunk(parsed, logPrefix);
+                  const modifiedData = JSON.stringify(processedData);
                   controller.enqueue(new TextEncoder().encode(`data: ${modifiedData}\n\n`));
                 } catch (error) {
-                  // If parsing fails, pass through as-is
+                  // If parsing fails, pass through as-is (but log the error)
+                  logger.debug(`${logPrefix}: Failed to parse SSE data: ${error.message}`);
                   controller.enqueue(new TextEncoder().encode(`${line}\n`));
                 }
               } else {
@@ -259,6 +274,12 @@ export class OpenAIHandler {
               }
             }
           }
+          
+          // Process any remaining buffer
+          if (buffer.trim()) {
+            controller.enqueue(new TextEncoder().encode(`${buffer}\n`));
+          }
+          
         } catch (error) {
           logger.error(`${logPrefix}: Streaming error:`, error);
           controller.error(error);
@@ -273,9 +294,68 @@ export class OpenAIHandler {
       headers: {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
       }
     });
+  }
+
+  /**
+   * Check if content chunk should be skipped (matches backend-docker logic)
+   */
+  shouldSkipContentChunk(parsed) {
+    if (!parsed.choices || !parsed.choices[0] || !parsed.choices[0].delta) {
+      return false;
+    }
+    
+    const content = parsed.choices[0].delta.content;
+    if (!content) {
+      return false;
+    }
+    
+    // Skip excessive whitespace (matching backend-docker logic)
+    if (this.isExcessiveWhitespace(content)) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Check if text contains excessive whitespace
+   */
+  isExcessiveWhitespace(text) {
+    if (!text) return true;
+    
+    // If text only contains whitespace and is longer than 10 characters
+    const whitespaceOnly = text.replace(/\n/g, '').replace(/ /g, '').replace(/\t/g, '');
+    if (!whitespaceOnly && text.length > 10) {
+      return true;
+    }
+    
+    // If contains more than 3 consecutive newlines
+    if (text.includes('\n\n\n')) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Process individual stream chunk
+   */
+  processStreamChunk(parsed, logPrefix) {
+    // Add timestamp and request ID for debugging
+    if (parsed.choices && parsed.choices[0]) {
+      parsed.choices[0]._debug = {
+        timestamp: new Date().toISOString(),
+        request_id: logPrefix
+      };
+    }
+    
+    return parsed;
   }
 
   /**

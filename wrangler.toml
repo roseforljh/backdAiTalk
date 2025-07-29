@@ -12,6 +12,8 @@ name = "backend-worker-staging"
 # Environment variables (set these in Cloudflare dashboard or via wrangler secret)
 # OPENAI_API_KEY
 # GEMINI_API_KEY
+# GOOGLE_API_KEY (for web search)
+# GOOGLE_CSE_ID (for web search)
 # GOOGLE_APPLICATION_CREDENTIALS (for service account JSON)
 
 # KV namespace for caching (optional)
@@ -29,3 +31,5 @@ LOG_LEVEL = "INFO"
 API_TIMEOUT = "30000"
 READ_TIMEOUT = "25000"
 MAX_CONNECTIONS = "100"
+SEARCH_RESULT_COUNT = "5"
+SEARCH_SNIPPET_MAX_LENGTH = "200"

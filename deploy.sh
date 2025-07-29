@@ -24,9 +24,9 @@ if [ ! -f "wrangler.toml" ]; then
     exit 1
 fi
 
-# 运行基本测试
-echo "🧪 运行基本测试..."
-node test-local.js
+# 运行功能测试
+echo "🧪 运行功能测试..."
+node test-functionality.js
 
 # 安装依赖
 echo "📦 安装依赖..."

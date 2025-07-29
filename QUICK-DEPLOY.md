@@ -37,11 +37,15 @@ npm run deploy
 在 Cloudflare Dashboard 中设置：
 - `OPENAI_API_KEY` - 你的 OpenAI API 密钥
 - `GEMINI_API_KEY` - 你的 Gemini API 密钥
+- `GOOGLE_API_KEY` - Google API 密钥（可选，用于Web搜索）
+- `GOOGLE_CSE_ID` - Google 自定义搜索引擎ID（可选，用于Web搜索）
 
 或使用命令行：
 ```bash
 wrangler secret put OPENAI_API_KEY
 wrangler secret put GEMINI_API_KEY
+wrangler secret put GOOGLE_API_KEY
+wrangler secret put GOOGLE_CSE_ID
 ```
 
 ### 6. 测试部署
