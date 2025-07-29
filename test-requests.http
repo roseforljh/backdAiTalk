@@ -2,7 +2,7 @@
 # 使用 VS Code REST Client 扩展或类似工具测试
 
 ### 变量定义
-@baseUrl = https://your-worker-name.your-subdomain.workers.dev
+@baseUrl = https://backend-worker.your-subdomain.workers.dev
 @openaiKey = your-openai-api-key
 @geminiKey = your-gemini-api-key
 
@@ -25,7 +25,31 @@ Content-Type: application/json
   "max_tokens": 100
 }
 
-### 主聊天接口 - OpenAI
+### 主聊天接口 - OpenAI (Form Data - matches backend-docker)
+POST {{baseUrl}}/chat
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="chat_request_json"
+
+{
+  "provider": "openai",
+  "model": "gpt-3.5-turbo",
+  "api_key": "{{openaiKey}}",
+  "api_address": "https://api.openai.com/v1/chat/completions",
+  "messages": [
+    {
+      "role": "user",
+      "type": "simple_text_message",
+      "content": "Tell me a joke"
+    }
+  ],
+  "temperature": 0.7,
+  "max_tokens": 150
+}
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+### 主聊天接口 - OpenAI (JSON Alternative)
 POST {{baseUrl}}/api/v1/chat
 Content-Type: application/json
 
@@ -45,7 +69,30 @@ Content-Type: application/json
   "max_tokens": 150
 }
 
-### 主聊天接口 - Gemini
+### 主聊天接口 - Gemini (Form Data)
+POST {{baseUrl}}/chat
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="chat_request_json"
+
+{
+  "provider": "gemini",
+  "model": "gemini-pro",
+  "api_key": "{{geminiKey}}",
+  "api_address": "https://generativelanguage.googleapis.com/v1beta",
+  "messages": [
+    {
+      "role": "user",
+      "type": "simple_text_message",
+      "content": "Explain quantum computing in simple terms"
+    }
+  ],
+  "temperature": 0.5
+}
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+### 主聊天接口 - Gemini (JSON Alternative)
 POST {{baseUrl}}/api/v1/chat
 Content-Type: application/json
 

@@ -1,6 +1,6 @@
 name = "backend-worker"
 main = "src/index.js"
-compatibility_date = "2025-01-30"
+compatibility_date = "2025-07-30"
 compatibility_flags = ["nodejs_compat"]
 
 [env.production]

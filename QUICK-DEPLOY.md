@@ -19,7 +19,7 @@ wrangler login
 ### 2. 修改配置
 编辑 `wrangler.toml`，将 `name` 改为你的 Worker 名称：
 ```toml
-name = "my-eztalk-proxy"  # 改成你想要的名称
+name = "backend-worker"  # 已经设置好了
 ```
 
 ### 3. 安装依赖并构建
@@ -46,7 +46,7 @@ wrangler secret put GEMINI_API_KEY
 
 ### 6. 测试部署
 ```bash
-curl https://your-worker-name.your-subdomain.workers.dev/health
+curl https://backend-worker.your-subdomain.workers.dev/health
 ```
 
 ## 🎉 完成！
@@ -55,12 +55,26 @@ curl https://your-worker-name.your-subdomain.workers.dev/health
 
 ### API 端点
 - **健康检查**: `GET /health`
+- **主聊天接口**: `POST /chat` (与backend-docker兼容)
 - **OpenAI 兼容**: `POST /v1/chat/completions`
-- **主聊天接口**: `POST /api/v1/chat`
+- **备用聊天接口**: `POST /api/v1/chat`
 
 ### 示例请求
+
+**主聊天接口（Form Data，与backend-docker兼容）**:
 ```bash
-curl -X POST https://your-worker-name.your-subdomain.workers.dev/v1/chat/completions \
+curl -X POST https://backend-worker.your-subdomain.workers.dev/chat \
+  -F 'chat_request_json={
+    "provider": "openai",
+    "model": "gpt-3.5-turbo", 
+    "api_key": "your-api-key",
+    "messages": [{"role": "user", "type": "simple_text_message", "content": "Hello!"}]
+  }'
+```
+
+**OpenAI兼容接口（JSON）**:
+```bash
+curl -X POST https://backend-worker.your-subdomain.workers.dev/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-3.5-turbo",

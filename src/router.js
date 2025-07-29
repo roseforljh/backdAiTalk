@@ -16,7 +16,12 @@ export class Router {
     const method = request.method;
 
     try {
-      // Chat endpoints
+      // Main chat endpoint (matches backend-docker: /chat)
+      if (path === '/chat' || path.startsWith('/chat/')) {
+        return await this.chatHandler.handle(request, env, ctx);
+      }
+
+      // API v1 chat endpoints
       if (path.startsWith('/api/v1/chat')) {
         return await this.chatHandler.handle(request, env, ctx);
       }
@@ -37,6 +42,7 @@ export class Router {
         message: `Endpoint ${method} ${path} not found`,
         available_endpoints: [
           '/health',
+          '/chat',
           '/api/v1/chat/*',
           '/v1/chat/completions',
           '/api/gemini/*'

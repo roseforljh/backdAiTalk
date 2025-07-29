@@ -117,14 +117,14 @@ export class ChatHandler {
   }
 
   /**
-   * Parse request body (handles both JSON and form data)
+   * Parse request body (handles both JSON and form data, matching backend-docker)
    */
   async parseRequestBody(request) {
     const contentType = request.headers.get('content-type') || '';
     
     if (contentType.includes('application/json')) {
       return await request.json();
-    } else if (contentType.includes('multipart/form-data') || contentType.includes('application/x-www-form-urlencoded')) {
+    } else if (contentType.includes('multipart/form-data')) {
       const formData = await request.formData();
       const chatRequestJson = formData.get('chat_request_json');
       
@@ -134,7 +134,7 @@ export class ChatHandler {
       
       const requestData = JSON.parse(chatRequestJson);
       
-      // Handle uploaded files if any
+      // Handle uploaded files (matching backend-docker behavior)
       const uploadedFiles = [];
       for (const [key, value] of formData.entries()) {
         if (key !== 'chat_request_json' && value instanceof File) {
@@ -148,8 +148,17 @@ export class ChatHandler {
       }
       
       return requestData;
+    } else if (contentType.includes('application/x-www-form-urlencoded')) {
+      const formData = await request.formData();
+      const chatRequestJson = formData.get('chat_request_json');
+      
+      if (!chatRequestJson) {
+        throw new Error('Missing chat_request_json in form data');
+      }
+      
+      return JSON.parse(chatRequestJson);
     } else {
-      throw new Error('Unsupported content type');
+      throw new Error(`Unsupported content type: ${contentType}`);
     }
   }
 

@@ -68,7 +68,8 @@ npm run dev
 ## API端点
 
 ### 主要聊天端点
-- `POST /api/v1/chat` - 主要聊天接口
+- `POST /chat` - 主要聊天接口（与backend-docker兼容）
+- `POST /api/v1/chat` - 备用聊天接口
 - `POST /v1/chat/completions` - OpenAI兼容接口
 - `POST /api/gemini/*` - Gemini直接接口
 

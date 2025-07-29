@@ -38,7 +38,7 @@
 
 3. **测试部署**:
    ```bash
-   curl https://your-worker-name.your-subdomain.workers.dev/health
+   curl https://backend-worker.your-subdomain.workers.dev/health
    ```
 
 ## ✅ 部署后验证
