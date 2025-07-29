@@ -37,7 +37,6 @@ def should_skip_content_chunk(content_str: str, accumulated_content: str) -> boo
     """
     判断是否应该跳过当前的内容块
     """
-    # 如果是过多的空白字符，跳过
     if is_excessive_whitespace(content_str):
         return True
     
