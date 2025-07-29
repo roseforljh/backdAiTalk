@@ -1,13 +1,13 @@
-name = "eztalk-proxy-worker"
+name = "backend-worker"
 main = "src/index.js"
-compatibility_date = "2024-01-15"
+compatibility_date = "2025-01-30"
 compatibility_flags = ["nodejs_compat"]
 
 [env.production]
-name = "eztalk-proxy-worker"
+name = "backend-worker"
 
 [env.staging]
-name = "eztalk-proxy-worker-staging"
+name = "backend-worker-staging"
 
 # Environment variables (set these in Cloudflare dashboard or via wrangler secret)
 # OPENAI_API_KEY
