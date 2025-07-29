@@ -1,0 +1,53 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [ main, backend-worker ]
+    paths: [ 'backend-worker/**' ]
+  pull_request:
+    branches: [ main ]
+    paths: [ 'backend-worker/**' ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: backend-worker/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd backend-worker
+          npm ci
+
+      - name: Run tests
+        run: |
+          cd backend-worker
+          node test-functionality.js
+
+      - name: Build
+        run: |
+          cd backend-worker
+          npm run build
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: backend-worker
+          command: deploy
+
+      - name: Deploy to Staging (on PR)
+        if: github.event_name == 'pull_request'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          workingDirectory: backend-worker
+          command: deploy --env staging
