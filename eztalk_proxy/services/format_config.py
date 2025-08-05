@@ -57,6 +57,10 @@ class FormatRepairConfig:
     math_auto_wrap: bool = True
     math_strict_mode: bool = False
     math_preserve_spacing: bool = True
+    inline_math_detection: bool = True
+    preserve_inline_math_flow: bool = True
+    avoid_math_forced_newlines: bool = True
+    smart_math_context_awareness: bool = True
     
     # 代码修复配置
     code_auto_language_detection: bool = True
@@ -221,6 +225,10 @@ class FormatConfigManager:
                 'enable_math_repair': self.config.enable_math_repair,
                 'math_auto_wrap': self.config.math_auto_wrap,
                 'math_strict_mode': self.config.math_strict_mode,
+                'inline_math_detection': self.config.inline_math_detection,
+                'preserve_inline_math_flow': self.config.preserve_inline_math_flow,
+                'avoid_math_forced_newlines': self.config.avoid_math_forced_newlines,
+                'smart_math_context_awareness': self.config.smart_math_context_awareness,
             }
         elif content_type == "code":
             return {

@@ -29,7 +29,7 @@ class AIOutputFormatRepair:
     
     def repair_ai_output(self, text: str, output_type: str = "general") -> str:
         """
-        修复AI输出格式
+        修复AI输出格式 - 安全增强版本
         
         Args:
             text: 原始AI输出文本
@@ -38,37 +38,64 @@ class AIOutputFormatRepair:
         Returns:
             修复后的文本
         """
+        # 安全检查：空文本直接返回
         if not text or not text.strip():
             return text
             
         # 检查是否启用格式修复
         if not self.config.enable_format_repair:
+            self.logger.debug("Format repair is disabled, returning original text")
             return text
             
         # 检查文本长度限制
         if len(text) > self.config.max_text_length:
             self.logger.warning(f"Text length {len(text)} exceeds limit {self.config.max_text_length}")
             return text
+        
+        # 安全检查：避免修复正常的完整内容
+        if self._is_safe_content_that_should_not_be_modified(text):
+            self.logger.debug("Content appears safe and complete, skipping repair")
+            return text
             
         try:
+            original_text = text
             repaired_text = text
             
-            # 1. 基础格式清理
-            repaired_text = self._basic_format_cleanup(repaired_text)
+            # 记录修复前的状态
+            original_length = len(text)
+            original_lines = text.count('\n')
             
-            # 2. 根据输出类型进行专门修复
+            # 1. 极度保守的基础格式清理
+            repaired_text = self._safe_basic_format_cleanup(repaired_text)
+            
+            # 安全检查：确保基础清理没有删除重要内容
+            if len(repaired_text.strip()) < len(original_text.strip()) * 0.7:
+                self.logger.warning("Basic cleanup removed too much content, reverting")
+                repaired_text = original_text
+            
+            # 2. 根据输出类型进行专门修复（仅在安全时进行）
             if output_type == "json" and self.config.enable_json_repair:
-                repaired_text = self._repair_json_format(repaired_text)
+                repaired_text = self._safe_repair_json_format(repaired_text, original_text)
             elif output_type == "math" and self.config.enable_math_repair:
-                repaired_text = self._repair_math_format(repaired_text)
+                repaired_text = self._safe_repair_math_format(repaired_text, original_text)
             elif output_type == "code" and self.config.enable_code_repair:
-                repaired_text = self._repair_code_format(repaired_text)
+                repaired_text = self._safe_repair_code_format(repaired_text, original_text)
             else:
-                # 通用修复
-                repaired_text = self._repair_general_format(repaired_text)
+                # 通用修复（极度保守）
+                repaired_text = self._safe_repair_general_format(repaired_text, original_text)
             
-            # 3. 最终清理
-            repaired_text = self._final_cleanup(repaired_text)
+            # 3. 最终安全检查和清理
+            repaired_text = self._safe_final_cleanup(repaired_text, original_text)
+            
+            # 最终安全验证：确保修复后的内容仍然有意义
+            if not self._validate_repaired_content(repaired_text, original_text):
+                self.logger.warning("Repaired content failed validation, returning original")
+                return original_text
+            
+            # 记录修复统计
+            final_length = len(repaired_text)
+            final_lines = repaired_text.count('\n')
+            self.logger.debug(f"Repair stats: {original_length}->{final_length} chars, {original_lines}->{final_lines} lines")
             
             return repaired_text
             
@@ -76,20 +103,58 @@ class AIOutputFormatRepair:
             self.logger.error(f"Error repairing AI output: {e}")
             return text  # 出错时返回原始文本
     
+    def _is_safe_content_that_should_not_be_modified(self, text: str) -> bool:
+        """
+        检查内容是否是应该保持原样的安全内容
+        """
+        if not text or len(text.strip()) < 5:
+            return True
+            
+        # 检查是否是完整的结构化内容（不应被修复）
+        stripped = text.strip()
+        
+        # 包含完整句子的内容通常是安全的
+        sentence_endings = ['.', '。', '!', '！', '?', '？']
+        has_complete_sentences = any(ending in stripped for ending in sentence_endings)
+        
+        # 包含代码块的内容
+        has_code_blocks = '```' in stripped
+        
+        # 包含数学公式的内容
+        has_math_formulas = any(marker in stripped for marker in ['$', '\\[', '\\]', '\\(', '\\)'])
+        
+        # 包含列表或结构化内容
+        has_structured_content = any(marker in stripped for marker in ['- ', '* ', '1. ', '2. ', '#'])
+        
+        # 如果包含这些结构化元素，认为是安全内容
+        if has_complete_sentences or has_code_blocks or has_math_formulas or has_structured_content:
+            return True
+            
+        return False
+    
+    def _safe_basic_format_cleanup(self, text: str) -> str:
+        """极度保守的基础格式清理"""
+        if not text:
+            return text
+            
+        original_text = text
+        
+        # 只进行最基本和最安全的清理
+        # 1. 仅移除过多的连续空行（超过3个）
+        cleaned = re.sub(r'\n{4,}', '\n\n\n', text)
+        
+        # 2. 仅移除行尾的制表符和空格（但保留内容）
+        cleaned = re.sub(r'[ \t]+$', '', cleaned, flags=re.MULTILINE)
+        
+        # 安全检查：如果清理导致内容显著减少，恢复原文
+        if len(cleaned.strip()) < len(original_text.strip()) * 0.95:
+            return original_text
+            
+        return cleaned
+    
     def _basic_format_cleanup(self, text: str) -> str:
-        """基础格式清理"""
-        # 移除多余的空行（保留最多2个连续换行）
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        # 移除行尾空白
-        text = re.sub(r'[ \t]+\n', '\n', text)
-        
-        # 修复中英文混排的空格问题 - 更精确的匹配
-        # 只在中文和英文字母/数字之间添加空格，避免过度处理
-        text = re.sub(r'([\u4e00-\u9fa5])([a-zA-Z0-9])', r'\1 \2', text)
-        text = re.sub(r'([a-zA-Z0-9])([\u4e00-\u9fa5])', r'\1 \2', text)
-        
-        return text.strip()
+        """基础格式清理 - 已被安全版本替代"""
+        return self._safe_basic_format_cleanup(text)
     
     def _repair_json_format(self, text: str) -> str:
         """修复JSON格式"""
@@ -130,8 +195,107 @@ class AIOutputFormatRepair:
             self.logger.error(f"Error in _repair_json_format: {e}")
             return text
     
+    def _safe_repair_json_format(self, text: str, original_text: str) -> str:
+        """安全的JSON修复"""
+        if not self.config.enable_json_repair:
+            return text
+            
+        # 检查是否真的是JSON内容
+        stripped = text.strip()
+        if not (stripped.startswith('{') or stripped.startswith('[')):
+            return text
+            
+        try:
+            # 只尝试修复明显的JSON结构
+            return self._repair_json_format(text)
+        except Exception as e:
+            self.logger.warning(f"Safe JSON repair failed: {e}")
+            return original_text
+    
+    def _safe_repair_math_format(self, text: str, original_text: str) -> str:
+        """安全的数学公式修复"""
+        if not self.config.enable_math_repair:
+            return text
+            
+        # 只修复明显包含数学公式的内容
+        if not any(marker in text for marker in ['^', '_', '\\frac', '\\sqrt', '=']):
+            return text
+            
+        try:
+            return self._repair_math_format(text)
+        except Exception as e:
+            self.logger.warning(f"Safe math repair failed: {e}")
+            return original_text
+    
+    def _safe_repair_code_format(self, text: str, original_text: str) -> str:
+        """安全的代码修复"""
+        if not self.config.enable_code_repair:
+            return text
+            
+        # 只修复明显包含代码的内容
+        if '```' not in text and '`' not in text:
+            return text
+            
+        try:
+            return self._repair_code_format(text)
+        except Exception as e:
+            self.logger.warning(f"Safe code repair failed: {e}")
+            return original_text
+    
+    def _safe_repair_general_format(self, text: str, original_text: str) -> str:
+        """安全的通用格式修复"""
+        # 极度保守的通用修复，主要针对明显的格式问题
+        try:
+            repaired = text
+            
+            # 只修复明显的Markdown格式问题
+            if self.config.enable_markdown_repair:
+                # 修复明显缺少空格的标题
+                if re.search(r'^#{1,6}[^#\s]', repaired, re.MULTILINE):
+                    repaired = re.sub(r'^(#{1,6})([^#\s])', r'\1 \2', repaired, flags=re.MULTILINE)
+            
+            return repaired
+        except Exception as e:
+            self.logger.warning(f"Safe general repair failed: {e}")
+            return original_text
+    
+    def _safe_final_cleanup(self, text: str, original_text: str) -> str:
+        """安全的最终清理"""
+        try:
+            # 只进行最基本的最终清理
+            cleaned = text.strip()
+            
+            # 安全检查
+            if len(cleaned) < len(original_text.strip()) * 0.8:
+                return original_text
+                
+            return cleaned
+        except Exception as e:
+            self.logger.warning(f"Safe final cleanup failed: {e}")
+            return original_text
+    
+    def _validate_repaired_content(self, repaired: str, original: str) -> bool:
+        """验证修复后的内容是否合理"""
+        if not repaired or not repaired.strip():
+            return False
+            
+        # 长度检查：修复后的内容不应比原始内容短太多
+        if len(repaired.strip()) < len(original.strip()) * 0.5:
+            return False
+            
+        # 内容完整性检查：重要字符不应丢失
+        important_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\u4e00-\u9fa5')
+        original_important = set(c for c in original if c in important_chars)
+        repaired_important = set(c for c in repaired if c in important_chars)
+        
+        # 如果重要字符丢失超过20%，认为修复失败
+        if len(repaired_important) < len(original_important) * 0.8:
+            return False
+            
+        return True
+
     def _repair_math_format(self, text: str) -> str:
-        """修复数学公式格式 - 更保守的修复策略"""
+        """修复数学公式格式 - 智能识别行内和块级公式，避免强制换行"""
         if not self.config.enable_math_repair:
             return text
             
@@ -142,19 +306,51 @@ class AIOutputFormatRepair:
             has_math_delimiters = any(delimiter in repaired for delimiter in ['$', '\\[', '\\]', '\\(', '\\)'])
             
             if not has_math_delimiters:
-                # 只对明显的数学表达式进行修复，避免破坏普通文本
+                # 智能识别行内数学表达式，避免强制换行
                 
-                # 修复明显的数学公式（如勾股定理）
-                repaired = re.sub(r'\b([a-zA-Z])\^([0-9]+)\s*\+\s*([a-zA-Z])\^([0-9]+)\s*=\s*([a-zA-Z])\^([0-9]+)\b',
-                                 r'$\1^{\2} + \3^{\4} = \5^{\6}$', repaired)
+                # 1. 修复行内简单数学表达式（不添加换行）
+                # 匹配在句子中间的数学表达式，保持行内显示
+                repaired = re.sub(
+                    r'([\u4e00-\u9fa5a-zA-Z]\s*)([a-zA-Z])\^([0-9]+)(\s*[\u4e00-\u9fa5a-zA-Z])',
+                    r'\1$\2^{\3}$\4',
+                    repaired
+                )
                 
-                # 修复单独的指数表达式（更严格的条件）
-                repaired = re.sub(r'\b([a-zA-Z])\^([0-9]+)\b(?!\w)', r'$\1^{\2}$', repaired)
+                # 2. 只对独立成行的完整数学公式进行块级处理
+                # 识别完整的数学等式（如勾股定理），但保持与上下文的连贯性
+                repaired = re.sub(
+                    r'(?:\n|^)(\s*)([a-zA-Z])\^([0-9]+)\s*\+\s*([a-zA-Z])\^([0-9]+)\s*=\s*([a-zA-Z])\^([0-9]+)(?=\s*[\n。！？]|$)',
+                    r'\n\1$$\2^{\3} + \4^{\5} = \6^{\7}$$',
+                    repaired
+                )
                 
-                # 修复欧拉公式等科学公式
-                repaired = re.sub(r'\be\^([^\s\+\-\*\/\=\)\.]+)', r'$e^{\1}$', repaired)
+                # 3. 修复欧拉公式等科学公式 - 改进版本
+                repaired = re.sub(r'\be\^(\([^)]+\))', r'$e^{\1}$', repaired)  # e^(iπ) 形式
+                repaired = re.sub(r'\be\^([a-zA-Z]+)', r'$e^{\1}$', repaired)   # e^x 形式
+                
+                # 4. 修复其他常见数学表达式
+                # 处理逗号分隔的多个数学表达式
+                repaired = re.sub(
+                    r'(\s)([a-zA-Z])\^([0-9]+)(,\s*)([a-zA-Z])\^([0-9]+)(\s)',
+                    r'\1$\2^{\3}$\4$\5^{\6}$\7',
+                    repaired
+                )
+                
+                # 处理平方根
+                repaired = re.sub(
+                    r'(\s)(\\sqrt\{[^}]+\})(\s)',
+                    r'\1$\2$\3',
+                    repaired
+                )
+                
+                # 4. 修复简单的数学表达式，如分数、平方根等
+                repaired = re.sub(
+                    r'([\u4e00-\u9fa5a-zA-Z]\s*)(\\frac\{[^}]+\}\{[^}]+\})(\s*[\u4e00-\u9fa5a-zA-Z])',
+                    r'\1$\2$\3',
+                    repaired
+                )
             
-            # 修复破损的LaTeX语法
+            # 修复破损的LaTeX语法，但不改变其在文本中的位置
             # 修复缺失的大括号
             repaired = re.sub(r'\\frac\s*([^{])', r'\\frac{\1', repaired)
             repaired = re.sub(r'\\sqrt\s*([^{])', r'\\sqrt{\1', repaired)
@@ -165,11 +361,25 @@ class AIOutputFormatRepair:
             # 清理多余的转义字符
             repaired = re.sub(r'\\+([{}])', r'\\\1', repaired)
             
-            # 修复破损的数学分隔符
-            repaired = re.sub(r'\\\}\s*-\s*\\\]', '', repaired)  # 修复您截图中的错误
-            repaired = re.sub(r'\{(\d+)\}\{(\d+)\s*imes\s*(\d+)\}', r'{\1 \times \2 \times \3}', repaired)  # 修复乘法表达式
+            # 修复破损的数学分隔符 - 这是您截图中的问题
+            repaired = re.sub(r'\\\}\s*-\s*\\\]', '', repaired)  # 移除破损的分隔符
+            repaired = re.sub(r'\\\}\s*\\-\s*\\\]', '', repaired)  # 另一种形式
+            repaired = re.sub(r'\{(\d+)\}\{(\d+)\s*imes\s*(\d+)\}', r'{\1 \times \2 \times \3}', repaired)
             
-            self.logger.debug("Math format repair completed")
+            # 更积极的数学公式识别
+            # 识别完整的数学等式（如勾股定理）
+            repaired = re.sub(
+                r'(\s)([a-zA-Z])\^([0-9]+)\s*\+\s*([a-zA-Z])\^([0-9]+)\s*=\s*([a-zA-Z])\^([0-9]+)(\s)',
+                r'\1$\2^{\3} + \4^{\5} = \6^{\7}$\8',
+                repaired
+            )
+            
+            # 移除数学公式前后不必要的换行（关键修复）
+            # 避免数学公式被强制单独成行
+            repaired = re.sub(r'\n+(\$[^$]+\$)\n+', r' \1 ', repaired)  # 行内公式
+            repaired = re.sub(r'\n{3,}(\$\$[^$]+\$\$)\n{3,}', r'\n\n\1\n\n', repaired)  # 块级公式
+            
+            self.logger.debug("Math format repair completed - preserving inline positioning")
             return repaired
             
         except Exception as e:
@@ -231,15 +441,8 @@ class AIOutputFormatRepair:
         return repaired
     
     def _final_cleanup(self, text: str) -> str:
-        """最终清理"""
-        # 移除多余的空白字符
-        text = re.sub(r'[ \t]+', ' ', text)
-        
-        # 确保段落间有适当间距
-        text = re.sub(r'([.!?。！？])\s*\n([A-Z\u4e00-\u9fa5])', r'\1\n\n\2', text)
-        
-        # 最终去除首尾空白
-        return text.strip()
+        """最终清理 - 已被安全版本替代"""
+        return self._safe_final_cleanup(text, text)
     
     def create_structured_output(self, content: str, output_type: str = "general") -> Dict[str, Any]:
         """

@@ -370,24 +370,9 @@ async def handle_gemini_request(
                                             logger.debug(f"{log_prefix}: Processing text chunk of length {len(text_chunk)}")
                                             logger.debug(f"{log_prefix}: Text chunk preview: {repr(text_chunk[:100])}")
                                             
-                                            # 对于数学/计算内容，减少实时修复以避免破坏LaTeX语法
-                                            try:
-                                                # 检测是否为数学/计算内容
-                                                is_math_content = any(indicator in text_chunk for indicator in
-                                                    ['\\frac', '\\sqrt', '计算', '第一步', '第二步', '第三步', '=', '^', '_'])
-                                                
-                                                if is_math_content:
-                                                    # 对数学内容使用最小修复
-                                                    repaired_chunk = text_chunk.strip()
-                                                    logger.debug(f"{log_prefix}: Minimal repair for math content")
-                                                else:
-                                                    # 对普通内容使用正常修复
-                                                    output_type = format_repair_service.detect_output_type(text_chunk)
-                                                    repaired_chunk = format_repair_service.repair_ai_output(text_chunk, output_type)
-                                                    logger.debug(f"{log_prefix}: Applied format repair, type: {output_type}")
-                                            except Exception as repair_error:
-                                                logger.warning(f"{log_prefix}: Format repair failed for chunk: {repair_error}")
-                                                repaired_chunk = text_chunk
+                                            # 直接使用原生AI输出，不做任何格式修复
+                                            repaired_chunk = text_chunk
+                                            logger.debug(f"{log_prefix}: Using native AI output without format repair")
                                             
                                             # Store original text chunk for full_text accumulation
                                             original_full_text += text_chunk
@@ -418,29 +403,19 @@ async def handle_gemini_request(
                 logger.info(f"{log_prefix}: Original full text length: {len(original_full_text)}")
                 logger.info(f"{log_prefix}: Streamed full text length: {len(full_text)}")
                 
-                # 对完整文本应用最终格式修复
+                # 直接发送原生AI输出，不做最终格式修复
                 try:
-                    final_output_type = format_repair_service.detect_output_type(full_text)
-                    final_repaired_text = format_repair_service.repair_ai_output(full_text, final_output_type)
-                    
-                    # 发送最终修复的完整内容事件
-                    yield await sse_event_serializer_rest(AppStreamEventPy(
-                        type="content_final",
-                        text=final_repaired_text,
-                        timestamp=get_current_time_iso()
-                    ))
-                    
-                    logger.info(f"{log_prefix}: Applied final format repair, type: {final_output_type}")
-                    logger.info(f"{log_prefix}: Final repaired text length: {len(final_repaired_text)}")
-                    
-                except Exception as final_repair_error:
-                    logger.warning(f"{log_prefix}: Final format repair failed: {final_repair_error}")
-                    # 如果最终修复失败，发送原始内容
                     yield await sse_event_serializer_rest(AppStreamEventPy(
                         type="content_final",
                         text=full_text,
                         timestamp=get_current_time_iso()
                     ))
+                    
+                    logger.info(f"{log_prefix}: Sent native AI output without final format repair")
+                    logger.info(f"{log_prefix}: Final text length: {len(full_text)}")
+                    
+                except Exception as final_send_error:
+                    logger.warning(f"{log_prefix}: Failed to send final content: {final_send_error}")
             
             is_native_thinking = bool(gemini_chat_input.generation_config and gemini_chat_input.generation_config.thinking_config)
             use_custom_sep = should_apply_custom_separator_logic(gemini_chat_input, request_id, is_google_like_path=True, is_native_thinking_active=is_native_thinking)
