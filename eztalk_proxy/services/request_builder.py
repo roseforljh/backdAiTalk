@@ -24,14 +24,47 @@ from ..utils.helpers import is_gemini_2_5_model
 
 logger = logging.getLogger("EzTalkProxy.Services.RequestBuilder")
 
-# prompt逻辑已被删除，直接使用原生AI输出
+# 格式化输出prompt - 用于所有大模型
+MARKDOWN_FORMAT_SYSTEM_PROMPT = """严格遵循以下规则来组织你的输出：
+
+* **标题：** 使用 `#` 到 `######` 来创建不同级别的标题。
+* **段落：** 通过空行来分隔不同的段落。
+* **重点加粗（必须使用）：** 用星号将**重点**从众多文本中标注出来。
+* **链接：** 使用 `[链接文本](URL)` 来插入链接。
+* **列表：**
+    * **无序列表：** 使用 `*`、`-` 或 `+` 后跟一个空格。
+    * **有序列表：** 使用 `1.`、`2.` 等数字和句点。
+* **代码：**
+    * **行内代码：** 使用反引号 (`` ` ``) 包裹。
+    * **代码块：** 使用三个反引号 (```` ``` ````) 包裹，可选择指定语言。
+* **引用：** 使用 `>` 符号。
+* **水平线：** 使用 `---`、`***` 或 `___`。
+* **表格：** 使用 `|` 和 `-` 符号来构建。
+* **Emoji：** 可以在标题、子标题前插入 Emoji，例如 `🔢### 1. 确定棱台的底面积`。
+* **LaTeX:**
+    * **行内公式:** 使用 `$E=mc^2$`
+    * **块级公式（优先使用）:** 优先使用 `$$E=mc^2$$`居中显示公式。"""
 
 def add_system_prompt_if_needed(messages: List[Dict[str, Any]], request_id: str) -> List[Dict[str, Any]]:
     """
-    不再添加系统prompt，直接返回原始消息列表
+    为所有大模型添加格式化系统prompt
     """
     log_prefix = f"RID-{request_id}"
-    logger.info(f"{log_prefix}: System prompt injection disabled, using native AI output")
+    
+    # 检查是否已经存在系统消息
+    has_system_message = any(msg.get("role") == "system" for msg in messages)
+    
+    if not has_system_message:
+        # 添加格式化系统prompt到消息列表开头
+        system_message = {
+            "role": "system",
+            "content": MARKDOWN_FORMAT_SYSTEM_PROMPT
+        }
+        messages.insert(0, system_message)
+        logger.info(f"{log_prefix}: Added Markdown formatting system prompt for all models")
+    else:
+        logger.info(f"{log_prefix}: System message already exists, skipping prompt injection")
+    
     return messages
 
 def is_gemini_model_in_openai_format(model_name: str) -> bool:
@@ -54,8 +87,8 @@ def prepare_openai_request(
         "Accept": "text/event-stream"
     }
 
-    # 不再添加系统prompt，直接使用原始消息
-    final_messages = copy.deepcopy(processed_messages)
+    # 添加格式化系统prompt
+    final_messages = add_system_prompt_if_needed(copy.deepcopy(processed_messages), request_id)
     model_name_lower = request_data.model.lower()
 
     payload: Dict[str, Any] = {
@@ -190,10 +223,26 @@ def convert_parts_messages_to_rest_api_contents(
 
 def add_system_prompt_to_gemini_messages(messages: List[PartsApiMessagePy], request_id: str) -> List[PartsApiMessagePy]:
     """
-    不再添加系统prompt，直接返回原始消息列表
+    为Gemini添加格式化系统prompt
     """
     log_prefix = f"RID-{request_id}"
-    logger.info(f"{log_prefix}: Gemini system prompt injection disabled, using native AI output")
+    
+    # 检查是否已经存在系统消息
+    has_system_message = any(msg.role == "system" for msg in messages)
+    
+    if not has_system_message:
+        # 为Gemini创建系统消息 (使用parts格式)
+        system_text_part = PyTextContentPart(type="text_content", text=MARKDOWN_FORMAT_SYSTEM_PROMPT)
+        system_message = PartsApiMessagePy(
+            role="system",
+            message_type="parts_message",
+            parts=[system_text_part]
+        )
+        messages.insert(0, system_message)
+        logger.info(f"{log_prefix}: Added Markdown formatting system prompt for Gemini")
+    else:
+        logger.info(f"{log_prefix}: System message already exists for Gemini, skipping prompt injection")
+    
     return messages
 
 def prepare_gemini_rest_api_request(
@@ -255,8 +304,8 @@ def prepare_gemini_rest_api_request(
         else:
             logger.warning(f"{log_prefix}: Encountered unknown message type {type(msg_abstract)} in chat_input.messages during Gemini REST prep. Skipping.")
 
-    # 不再添加系统prompt，直接使用原始消息
-    # messages_to_convert_or_use = add_system_prompt_to_gemini_messages(messages_to_convert_or_use, request_id)
+    # 添加Gemini格式化系统prompt
+    messages_to_convert_or_use = add_system_prompt_to_gemini_messages(messages_to_convert_or_use, request_id)
 
     if not messages_to_convert_or_use:
         logger.error(f"{log_prefix}: No processable messages found for Gemini REST request.")

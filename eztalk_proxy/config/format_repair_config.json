@@ -8,6 +8,7 @@
   "enable_code_repair": false,
   "enable_xml_html_repair": false,
   "enable_structure_repair": false,
+  "enable_resume_repair": true,
   "correction_intensity": "light",
   "enable_caching": true,
   "enable_performance_optimization": true,

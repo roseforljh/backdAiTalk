@@ -397,25 +397,12 @@ async def handle_gemini_request(
             async for error_event in handle_stream_error(e, request_id, upstream_ok, first_chunk_received):
                 yield error_event
         finally:
-            # 最终格式修复处理
+            # 记录最终输出统计信息，但不重复发送内容
             if original_full_text:
                 logger.info(f"{log_prefix}: Final output ready")
                 logger.info(f"{log_prefix}: Original full text length: {len(original_full_text)}")
                 logger.info(f"{log_prefix}: Streamed full text length: {len(full_text)}")
-                
-                # 直接发送原生AI输出，不做最终格式修复
-                try:
-                    yield await sse_event_serializer_rest(AppStreamEventPy(
-                        type="content_final",
-                        text=full_text,
-                        timestamp=get_current_time_iso()
-                    ))
-                    
-                    logger.info(f"{log_prefix}: Sent native AI output without final format repair")
-                    logger.info(f"{log_prefix}: Final text length: {len(full_text)}")
-                    
-                except Exception as final_send_error:
-                    logger.warning(f"{log_prefix}: Failed to send final content: {final_send_error}")
+                logger.info(f"{log_prefix}: Content already streamed, skipping duplicate final send")
             
             is_native_thinking = bool(gemini_chat_input.generation_config and gemini_chat_input.generation_config.thinking_config)
             use_custom_sep = should_apply_custom_separator_logic(gemini_chat_input, request_id, is_google_like_path=True, is_native_thinking_active=is_native_thinking)

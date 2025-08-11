@@ -259,16 +259,46 @@ async def process_openai_like_sse_stream(
                     yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                     state["reasoning_finish_event_sent"] = True
                 
-                # 降低刷新条件：内容达到阈值或包含完整句子时立即刷新
-                should_flush = (
-                    len(state["accumulated_content"]) >= MIN_CONTENT_FLUSH_CHUNK_SIZE or
-                    # 包含句子结束符号时立即刷新
-                    any(punct in state["accumulated_content"] for punct in ['.', '!', '?', '。', '！', '？']) or
-                    # 包含代码块结束时立即刷新
-                    '```' in state["accumulated_content"] or
-                    # 包含数学公式结束时立即刷新
-                    ('$' in state["accumulated_content"] and state["accumulated_content"].count('$') % 2 == 0)
-                )
+                # 更智能的刷新条件：避免分割Markdown格式
+                should_flush = False
+                
+                # 基本长度阈值
+                if len(state["accumulated_content"]) >= MIN_CONTENT_FLUSH_CHUNK_SIZE:
+                    # 检查是否在Markdown格式中间，如果是则延迟刷新
+                    content = state["accumulated_content"]
+                    
+                    # 检查是否在标题格式中间 (## 标题：)
+                    if content.endswith('#') or content.endswith('# ') or content.endswith('## ') or content.endswith('### '):
+                        should_flush = False  # 等待标题完成
+                    # 检查是否在粗体/斜体格式中间
+                    elif content.count('*') % 2 != 0 or content.count('**') % 2 != 0:
+                        should_flush = False  # 等待格式完成
+                    # 检查是否在数学公式中间
+                    elif content.count('$') % 2 != 0:
+                        should_flush = False  # 等待数学公式完成
+                    else:
+                        should_flush = True
+                
+                # 包含完整句子时刷新（但要避免在格式中间）
+                if not should_flush and any(punct in state["accumulated_content"] for punct in ['.', '!', '?', '。', '！', '？']):
+                    content = state["accumulated_content"]
+                    # 确保不在格式中间
+                    if (content.count('*') % 2 == 0 and content.count('$') % 2 == 0 and 
+                        not content.endswith('#') and not content.endswith('# ') and 
+                        not content.endswith('## ') and not content.endswith('### ')):
+                        should_flush = True
+                
+                # 包含完整代码块时刷新
+                if not should_flush and '```' in state["accumulated_content"]:
+                    # 检查代码块是否完整（偶数个```）
+                    if state["accumulated_content"].count('```') % 2 == 0:
+                        should_flush = True
+                
+                # 包含完整数学公式时刷新
+                if not should_flush and '$' in state["accumulated_content"]:
+                    # 只有当数学公式完整时才刷新
+                    if state["accumulated_content"].count('$') % 2 == 0:
+                        should_flush = True
                 
                 if should_flush:
                     # 直接使用原生AI输出，不做任何清理
@@ -279,6 +309,7 @@ async def process_openai_like_sse_stream(
                     
                     yield {"type": "content", "text": native_content, "timestamp": get_current_time_iso()}
                     state["accumulated_content"] = ""
+                    content_str = "" # 标记为已处理
             else:
                 if not content_str:
                     logger.info(f"{log_prefix}: SKIPPED_CONTENT: Empty content chunk")
@@ -289,8 +320,8 @@ async def process_openai_like_sse_stream(
         if tool_calls_chunk or finish_reason:
             logger.info(f"{log_prefix}: process_openai_like_sse_stream: Handling finish/tool_calls - tool_calls: {bool(tool_calls_chunk)}, finish_reason: {finish_reason}")
             
-            # Before handling finish or tool calls, flush any remaining content.
-            if state["accumulated_content"]:
+            # Before handling finish or tool calls, flush any remaining content (only if not already sent).
+            if state["accumulated_content"] and not state.get("final_content_sent", False):
                 logger.info(f"{log_prefix}: FINAL_CONTENT_FLUSH: Flushing remaining content ({len(state['accumulated_content'])} chars)")
                 logger.info(f"{log_prefix}: FINAL_CONTENT_PREVIEW: {repr(state['accumulated_content'][:200])}")
                 
@@ -299,6 +330,10 @@ async def process_openai_like_sse_stream(
                 logger.info(f"{log_prefix}: FINAL_NATIVE_CONTENT_FLUSH: Sending final native AI output ({len(native_final_content)} chars)")
                 yield {"type": "content", "text": native_final_content, "timestamp": get_current_time_iso()}
                 state["accumulated_content"] = ""
+                state["final_content_sent"] = True  # 标记最终内容已发送
+            elif state["accumulated_content"]:
+                logger.info(f"{log_prefix}: FINAL_CONTENT_SKIP: Final content already sent, skipping duplicate send")
+                state["accumulated_content"] = ""  # 清空以避免cleanup时重复
 
             # If there was any reasoning, ensure the finish event is sent before the final block.
             if state["had_any_reasoning"] and not state["reasoning_finish_event_sent"]:
@@ -381,12 +416,13 @@ async def handle_stream_cleanup(
         logger.info(f"{log_prefix}: Cleanup: Sending reasoning_finish event.")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="reasoning_finish", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
 
-    # Flush any remaining content in the buffer
+    # 完全禁用cleanup时的内容发送，避免重复
     if accumulated_content:
-        # 直接使用原生AI输出，不做最终预处理
-        native_remaining_content = accumulated_content
-        logger.info(f"{log_prefix}: Cleanup: Flushing remaining native content: '{native_remaining_content[:100]}...'")
-        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="content", text=native_remaining_content, timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
+        logger.info(f"{log_prefix}: Cleanup: Found remaining content ({len(accumulated_content)} chars) - SKIPPING to avoid duplication")
+        logger.info(f"{log_prefix}: Cleanup: Content preview: '{accumulated_content[:100]}...'")
+        logger.info(f"{log_prefix}: Cleanup: Content already sent during streaming, not sending again")
+    else:
+        logger.info(f"{log_prefix}: Cleanup: No remaining content to flush")
 
     # Send the final finish event if it hasn't been sent already by a finish_reason from the LLM.
     if not state.get("final_finish_event_sent_by_llm_reason"):

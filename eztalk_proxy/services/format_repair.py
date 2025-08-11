@@ -366,13 +366,7 @@ class AIOutputFormatRepair:
             repaired = re.sub(r'\\\}\s*\\-\s*\\\]', '', repaired)  # 另一种形式
             repaired = re.sub(r'\{(\d+)\}\{(\d+)\s*imes\s*(\d+)\}', r'{\1 \times \2 \times \3}', repaired)
             
-            # 更积极的数学公式识别
-            # 识别完整的数学等式（如勾股定理）
-            repaired = re.sub(
-                r'(\s)([a-zA-Z])\^([0-9]+)\s*\+\s*([a-zA-Z])\^([0-9]+)\s*=\s*([a-zA-Z])\^([0-9]+)(\s)',
-                r'\1$\2^{\3} + \4^{\5} = \6^{\7}$\8',
-                repaired
-            )
+            # 注意：完整数学等式的识别已在上面的块级处理中完成，避免重复匹配
             
             # 移除数学公式前后不必要的换行（关键修复）
             # 避免数学公式被强制单独成行
@@ -411,7 +405,7 @@ class AIOutputFormatRepair:
             return text
     
     def _repair_general_format(self, text: str) -> str:
-        """通用格式修复"""
+        """通用格式修复 - 仅处理Markdown格式，不重复调用数学和代码修复"""
         repaired = text
         
         # 修复Markdown标题
@@ -431,15 +425,33 @@ class AIOutputFormatRepair:
         if self.config.enable_markdown_repair and self.config.markdown_fix_links:
             repaired = re.sub(r'\[([^\]]+)\]\s*\(([^)]+)\)', r'[\1](\2)', repaired)
         
-        # 数学和代码混合修复
-        if self.config.enable_math_repair:
-            repaired = self._repair_math_format(repaired)
-            
-        if self.config.enable_code_repair:
-            repaired = self._repair_code_format(repaired)
+        # 注意：数学和代码修复已在repair_ai_output中根据类型单独处理，避免重复调用
         
         return repaired
-    
+
+    def _repair_resume_format(self, text: str) -> str:
+        """
+        修复简历格式
+        """
+        if not self.config.enable_resume_repair:
+            return text
+
+        # 添加标题
+        if not text.strip().startswith("# 个人简历"):
+            text = f"# 个人简历\\n\\n{text}"
+
+        # 加粗主要部分
+        text = re.sub(r"^(联系方式|个人总结|工作经验|教育背景|专业技能|软技能|荣誉与奖项)", r"**\\1**", text, flags=re.MULTILINE)
+
+        # 格式化列表
+        text = re.sub(r"^\s*([·*•-])\s*(.*)", r"- \\2", text, flags=re.MULTILINE)
+
+        # 添加结尾
+        if "---" not in text:
+            text += "\\n\\n---\\n*这份简历由AI优化，祝您求职顺利！*"
+
+        return text
+
     def _final_cleanup(self, text: str) -> str:
         """最终清理 - 已被安全版本替代"""
         return self._safe_final_cleanup(text, text)

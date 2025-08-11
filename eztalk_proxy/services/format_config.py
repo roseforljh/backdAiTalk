@@ -22,21 +22,22 @@ class CorrectionIntensity(Enum):
 class FormatRepairConfig:
     """格式修复配置类"""
     
-    # 基础开关
+    # 基础开关 - 启用格式修复但避免重复处理
     enable_format_repair: bool = True
-    enable_realtime_repair: bool = True
+    enable_realtime_repair: bool = False  # 禁用实时修复，只在最终进行一次修复
     enable_final_repair: bool = True
     
-    # 具体修复功能
+    # 具体修复功能 - 使用保守设置
     enable_json_repair: bool = True
     enable_math_repair: bool = True
-    enable_markdown_repair: bool = True
+    enable_markdown_repair: bool = False  # 禁用Markdown修复以减少干扰
     enable_code_repair: bool = True
-    enable_xml_html_repair: bool = True
-    enable_structure_repair: bool = True
+    enable_xml_html_repair: bool = False  # 禁用XML/HTML修复以减少干扰
+    enable_structure_repair: bool = False  # 禁用结构修复以减少干扰
+    enable_resume_repair: bool = True,  # 启用简历修复
     
-    # 修复强度
-    correction_intensity: CorrectionIntensity = CorrectionIntensity.MEDIUM
+    # 修复强度 - 使用轻度修复避免过度处理
+    correction_intensity: CorrectionIntensity = CorrectionIntensity.LIGHT,
     
     # 性能优化
     enable_caching: bool = True
@@ -73,10 +74,10 @@ class FormatRepairConfig:
     json_fix_brackets: bool = True
     
     # Markdown修复配置
-    markdown_fix_headers: bool = True
-    markdown_fix_lists: bool = True
-    markdown_fix_links: bool = True
-    markdown_fix_quotes: bool = True
+    markdown_fix_headers: bool = False  # 禁用标题修复
+    markdown_fix_lists: bool = False    # 禁用列表修复
+    markdown_fix_links: bool = False    # 禁用链接修复
+    markdown_fix_quotes: bool = False   # 禁用引用修复
     
     # 调试选项
     debug_mode: bool = False
