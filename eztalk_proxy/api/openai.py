@@ -91,26 +91,13 @@ def is_gemini_openai_compatible_request(chat_input) -> bool:
     return is_gemini_model(chat_input.model)
 
 def supports_multimodal_content(model_name: str) -> bool:
-    """检测模型是否支持多模态内容（音频、视频、图像）"""
-    if not model_name:
-        return False
-    model_lower = model_name.lower()
+    """检测模型是否支持多模态内容（音频、视频、图像）
     
-    # Gemini模型支持多模态
-    if "gemini" in model_lower:
-        return True
-    
-    # OpenAI GPT-4o系列支持多模态
-    if "gpt-4o" in model_lower:
-        return True
-    
-    # Claude 3.5 Sonnet支持图像，但不支持音频/视频
-    # 为了保持一致性，我们也允许它处理，让模型自己决定
-    if "claude-3" in model_lower or "claude-3.5" in model_lower:
-        return True
-    
-    # 其他可能支持多模态的模型可以在这里添加
-    return False
+    注意：根据用户要求，不再对模型类型进行判断，
+    所有模型都被视为支持多模态内容，让模型自己决定如何处理。
+    """
+    # 始终返回 True，不再限制模型类型
+    return True
 
 def is_google_official_api(api_address: str) -> bool:
     """检测是否为Google官方API地址"""
@@ -162,8 +149,6 @@ async def handle_openai_compatible_request(
     document_texts = []
     # 检测是否为Gemini模型以启用增强的多模态支持
     is_gemini_request = is_gemini_openai_compatible_request(chat_input)
-    # 检测模型是否支持多模态内容
-    supports_multimodal = supports_multimodal_content(chat_input.model)
     # 检测是否为Google官方API
     is_official_google_api = is_google_official_api(chat_input.api_address or "")
     
@@ -171,8 +156,8 @@ async def handle_openai_compatible_request(
         for doc_file in uploaded_documents:
             content_type = doc_file.content_type.lower() if doc_file.content_type else ""
             
-            # 为支持多模态的模型提供音频/视频/图像支持
-            if supports_multimodal and content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
+            # 处理所有多模态文件（音频/视频/图像），不再基于模型类型进行限制
+            if content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
                 # 如果是Gemini模型但使用第三方API，给出警告
                 if is_gemini_request and not is_official_google_api and content_type in (AUDIO_MIME_TYPES + VIDEO_MIME_TYPES):
                     logger.warning(f"{log_prefix}: Using third-party API '{chat_input.api_address}' for Gemini model with audio/video content. This may not work properly.")
@@ -193,21 +178,6 @@ async def handle_openai_compatible_request(
                     logger.info(f"{log_prefix}: Staged multimodal file '{doc_file.filename}' ({content_type}, {file_size / 1024 / 1024:.2f} MB) for processing with {chat_input.model}.")
                 except Exception as e:
                     logger.error(f"{log_prefix}: Failed to read multimodal file {doc_file.filename} into memory: {e}", exc_info=True)
-            # 对于不支持多模态的模型，提供友好的错误信息
-            elif content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
-                logger.warning(f"{log_prefix}: Model '{chat_input.model}' does not support multimodal content. Skipping file '{doc_file.filename}' ({content_type})")
-                
-                # 添加到文档文本中作为说明，稍后在event_stream_generator中发送错误信息
-                document_texts.append(f"""[Multimodal File Skipped: {doc_file.filename}]
-
-The file '{doc_file.filename}' ({content_type}) was uploaded but cannot be processed by the current model '{chat_input.model}'.
-
-To process audio, video, or image files, please use a multimodal model such as:
-- GPT-4o or GPT-4o-mini (OpenAI)
-- Gemini models (Google)
-- Claude-3.5 Sonnet (Anthropic)
-
-The file was skipped and not included in the analysis.""")
             # Process other documents for text extraction
             else:
                 temp_file_path = ""
@@ -244,17 +214,6 @@ The file was skipped and not included in the analysis.""")
             # 1. Prepare context from newly uploaded files
             full_document_context = ""
             if document_texts:
-                # 检查是否有被跳过的多模态文件，发送警告信息
-                for doc_text in document_texts:
-                    if "[Multimodal File Skipped:" in doc_text:
-                        # 提取文件名
-                        import re
-                        match = re.search(r'\[Multimodal File Skipped: ([^\]]+)\]', doc_text)
-                        if match:
-                            filename = match.group(1)
-                            warning_message = f"Model '{chat_input.model}' does not support audio/video/image content. File '{filename}' was skipped. Please use a multimodal model like GPT-4o, Gemini, or Claude-3.5."
-                            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="error", message=warning_message).model_dump(by_alias=True, exclude_none=True))
-                
                 full_document_context = "\n\n".join(document_texts)
                 full_document_context = f"--- Document Content ---\n{full_document_context}\n--- End Document ---\n\n"
             
@@ -512,6 +471,16 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
 
             async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
                 upstream_ok = response.status_code == 200
+                
+                # 如果响应不是200，记录详细错误信息
+                if response.status_code != 200:
+                    try:
+                        error_content = await response.aread()
+                        error_text = error_content.decode('utf-8')
+                        logger.error(f"{log_prefix}: API request failed with status {response.status_code}. Response: {error_text}")
+                    except Exception as e:
+                        logger.error(f"{log_prefix}: API request failed with status {response.status_code}. Could not read error response: {e}")
+                
                 response.raise_for_status()
                 
                 buffer = bytearray()

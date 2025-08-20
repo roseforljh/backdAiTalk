@@ -405,27 +405,59 @@ class AIOutputFormatRepair:
             return text
     
     def _repair_general_format(self, text: str) -> str:
-        """通用格式修复 - 仅处理Markdown格式，不重复调用数学和代码修复"""
+        """通用格式修复 - 增强版Markdown格式修复"""
         repaired = text
         
-        # 修复Markdown标题
+        # 修复Markdown标题 - 增强版
         if self.config.enable_markdown_repair and self.config.markdown_fix_headers:
+            # 修复标题格式：确保#后面有空格
             repaired = re.sub(r'^(#{1,6})([^#\s])', r'\1 \2', repaired, flags=re.MULTILINE)
+            # 修复标题前后的换行
+            repaired = re.sub(r'([^\n])\n(#{1,6} .+)', r'\1\n\n\2', repaired)
+            repaired = re.sub(r'(#{1,6} .+)\n([^\n#])', r'\1\n\n\2', repaired)
         
-        # 修复列表格式
+        # 修复列表格式 - 增强版
         if self.config.enable_markdown_repair and self.config.markdown_fix_lists:
+            # 无序列表
             repaired = re.sub(r'^(\s*)([*\-+])([^\s])', r'\1\2 \3', repaired, flags=re.MULTILINE)
+            # 有序列表
             repaired = re.sub(r'^(\s*)(\d+\.)([^\s])', r'\1\2 \3', repaired, flags=re.MULTILINE)
+            # 修复列表项之间的间距
+            repaired = re.sub(r'(^\s*[*\-+\d+\.] .+)\n\n+(^\s*[*\-+\d+\.] )', r'\1\n\2', repaired, flags=re.MULTILINE)
         
-        # 修复引用格式
+        # 修复引用格式 - 增强版
         if self.config.enable_markdown_repair and self.config.markdown_fix_quotes:
             repaired = re.sub(r'^(>+)([^>\s])', r'\1 \2', repaired, flags=re.MULTILINE)
+            # 修复多行引用
+            repaired = re.sub(r'(^> .+)\n([^>\n])', r'\1\n> \2', repaired, flags=re.MULTILINE)
         
-        # 修复链接格式
+        # 修复链接格式 - 增强版
         if self.config.enable_markdown_repair and self.config.markdown_fix_links:
+            # 标准链接格式
             repaired = re.sub(r'\[([^\]]+)\]\s*\(([^)]+)\)', r'[\1](\2)', repaired)
+            # 修复不完整的链接
+            repaired = re.sub(r'\[\]\(([^)]+)\)', r'[\1](\1)', repaired)
         
-        # 注意：数学和代码修复已在repair_ai_output中根据类型单独处理，避免重复调用
+        # 修复粗体和斜体格式
+        if self.config.enable_markdown_repair:
+            # 修复不完整的粗体格式
+            repaired = re.sub(r'\*\*([^*]+?)\*(?!\*)', r'**\1**', repaired)
+            repaired = re.sub(r'(?<!\*)\*([^*]+?)\*\*', r'**\1**', repaired)
+            # 修复不完整的斜体格式（更保守）
+            repaired = re.sub(r'(?<!\*)\*([^*\s]+(?:\s+[^*\s]+)*)\*(?!\*)', r'*\1*', repaired)
+        
+        # 修复代码块格式
+        if self.config.enable_code_repair:
+            # 修复不完整的代码块
+            if repaired.count('```') % 2 != 0:
+                repaired += '\n```'
+            # 修复行内代码格式
+            repaired = re.sub(r'`([^`\n]+)`', r'`\1`', repaired)
+        
+        # 修复表格格式
+        if self.config.enable_markdown_repair:
+            # 确保表格行的格式正确
+            repaired = re.sub(r'^\|(.+)\|$', r'| \1 |', repaired, flags=re.MULTILINE)
         
         return repaired
 
