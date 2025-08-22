@@ -471,16 +471,6 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
 
             async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
                 upstream_ok = response.status_code == 200
-                
-                # 如果响应不是200，记录详细错误信息
-                if response.status_code != 200:
-                    try:
-                        error_content = await response.aread()
-                        error_text = error_content.decode('utf-8')
-                        logger.error(f"{log_prefix}: API request failed with status {response.status_code}. Response: {error_text}")
-                    except Exception as e:
-                        logger.error(f"{log_prefix}: API request failed with status {response.status_code}. Could not read error response: {e}")
-                
                 response.raise_for_status()
                 
                 buffer = bytearray()

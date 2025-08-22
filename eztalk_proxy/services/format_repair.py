@@ -106,30 +106,35 @@ class AIOutputFormatRepair:
     def _is_safe_content_that_should_not_be_modified(self, text: str) -> bool:
         """
         检查内容是否是应该保持原样的安全内容
+        只有非常特殊的情况才跳过修复
         """
         if not text or len(text.strip()) < 5:
             return True
             
-        # 检查是否是完整的结构化内容（不应被修复）
         stripped = text.strip()
         
-        # 包含完整句子的内容通常是安全的
-        sentence_endings = ['.', '。', '!', '！', '?', '？']
-        has_complete_sentences = any(ending in stripped for ending in sentence_endings)
+        # 只有以下情况才跳过修复：
+        # 1. 已经是完美格式的JSON
+        if stripped.startswith('{') and stripped.endswith('}'):
+            try:
+                json.loads(stripped)
+                return True  # 有效的JSON，不需要修复
+            except:
+                pass
         
-        # 包含代码块的内容
-        has_code_blocks = '```' in stripped
+        # 2. 已经包含正确格式的数学公式（有$符号包围）
+        if '$' in stripped and stripped.count('$') >= 2:
+            # 检查是否已经有正确的数学公式格式
+            math_pattern = r'\$[^$]+\$|\$\$[^$]+\$\$'
+            if re.search(math_pattern, stripped):
+                # 即使有数学公式，也允许修复，因为可能有其他需要修复的内容
+                return False
         
-        # 包含数学公式的内容
-        has_math_formulas = any(marker in stripped for marker in ['$', '\\[', '\\]', '\\(', '\\)'])
-        
-        # 包含列表或结构化内容
-        has_structured_content = any(marker in stripped for marker in ['- ', '* ', '1. ', '2. ', '#'])
-        
-        # 如果包含这些结构化元素，认为是安全内容
-        if has_complete_sentences or has_code_blocks or has_math_formulas or has_structured_content:
+        # 3. 纯代码块内容（完全被```包围）
+        if stripped.startswith('```') and stripped.endswith('```'):
             return True
             
+        # 其他所有情况都允许修复
         return False
     
     def _safe_basic_format_cleanup(self, text: str) -> str:
@@ -295,7 +300,7 @@ class AIOutputFormatRepair:
         return True
 
     def _repair_math_format(self, text: str) -> str:
-        """修复数学公式格式 - 智能识别行内和块级公式，避免强制换行"""
+        """修复数学公式格式 - 严格按照前端KaTeX解析要求"""
         if not self.config.enable_math_repair:
             return text
             
@@ -306,74 +311,89 @@ class AIOutputFormatRepair:
             has_math_delimiters = any(delimiter in repaired for delimiter in ['$', '\\[', '\\]', '\\(', '\\)'])
             
             if not has_math_delimiters:
-                # 智能识别行内数学表达式，避免强制换行
+                # 1. 修复常见的数学表达式格式
                 
-                # 1. 修复行内简单数学表达式（不添加换行）
-                # 匹配在句子中间的数学表达式，保持行内显示
+                # 指数表达式 (x^2, a^n 等)
                 repaired = re.sub(
-                    r'([\u4e00-\u9fa5a-zA-Z]\s*)([a-zA-Z])\^([0-9]+)(\s*[\u4e00-\u9fa5a-zA-Z])',
-                    r'\1$\2^{\3}$\4',
+                    r'\b([a-zA-Z])\^([0-9]+)\b',
+                    r'$\1^{\2}$',
                     repaired
                 )
                 
-                # 2. 只对独立成行的完整数学公式进行块级处理
-                # 识别完整的数学等式（如勾股定理），但保持与上下文的连贯性
+                # 复杂指数表达式 (x^(n+1), e^(iπ) 等)
                 repaired = re.sub(
-                    r'(?:\n|^)(\s*)([a-zA-Z])\^([0-9]+)\s*\+\s*([a-zA-Z])\^([0-9]+)\s*=\s*([a-zA-Z])\^([0-9]+)(?=\s*[\n。！？]|$)',
-                    r'\n\1$$\2^{\3} + \4^{\5} = \6^{\7}$$',
+                    r'\b([a-zA-Z])\^\(([^)]+)\)',
+                    r'$\1^{\2}$',
                     repaired
                 )
                 
-                # 3. 修复欧拉公式等科学公式 - 改进版本
-                repaired = re.sub(r'\be\^(\([^)]+\))', r'$e^{\1}$', repaired)  # e^(iπ) 形式
-                repaired = re.sub(r'\be\^([a-zA-Z]+)', r'$e^{\1}$', repaired)   # e^x 形式
+                # 欧拉公式和自然对数
+                repaired = re.sub(r'\be\^\{([^}]+)\}', r'$e^{\1}$', repaired)
+                repaired = re.sub(r'\be\^([a-zA-Z]+)', r'$e^{\1}$', repaired)
+                repaired = re.sub(r'\be\^\(([^)]+)\)', r'$e^{\1}$', repaired)
                 
-                # 4. 修复其他常见数学表达式
-                # 处理逗号分隔的多个数学表达式
+                # 分数表达式
                 repaired = re.sub(
-                    r'(\s)([a-zA-Z])\^([0-9]+)(,\s*)([a-zA-Z])\^([0-9]+)(\s)',
-                    r'\1$\2^{\3}$\4$\5^{\6}$\7',
+                    r'\\frac\{([^}]+)\}\{([^}]+)\}',
+                    r'$\\frac{\1}{\2}$',
                     repaired
                 )
                 
-                # 处理平方根
+                # 平方根表达式
                 repaired = re.sub(
-                    r'(\s)(\\sqrt\{[^}]+\})(\s)',
-                    r'\1$\2$\3',
+                    r'\\sqrt\{([^}]+)\}',
+                    r'$\\sqrt{\1}$',
                     repaired
                 )
                 
-                # 4. 修复简单的数学表达式，如分数、平方根等
+                # 希腊字母
+                greek_letters = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'theta', 'lambda', 'mu', 'pi', 'sigma', 'phi', 'omega']
+                for letter in greek_letters:
+                    repaired = re.sub(f'\\\\{letter}\\b', f'$\\\\{letter}$', repaired)
+                
+                # 数学运算符
+                math_operators = ['times', 'div', 'pm', 'mp', 'cdot', 'ast', 'star', 'circ', 'bullet']
+                for op in math_operators:
+                    repaired = re.sub(f'\\\\{op}\\b', f'$\\\\{op}$', repaired)
+                
+                # 完整的数学等式 (独立成行)
                 repaired = re.sub(
-                    r'([\u4e00-\u9fa5a-zA-Z]\s*)(\\frac\{[^}]+\}\{[^}]+\})(\s*[\u4e00-\u9fa5a-zA-Z])',
-                    r'\1$\2$\3',
+                    r'(?:^|\n)(\s*)([a-zA-Z])\^([0-9]+)\s*\+\s*([a-zA-Z])\^([0-9]+)\s*=\s*([a-zA-Z])\^([0-9]+)(?=\s*$|\n)',
+                    r'\n\1$$\2^{\3} + \4^{\5} = \6^{\7}$$\n',
+                    repaired
+                )
+                
+                # 复杂数学等式
+                repaired = re.sub(
+                    r'(?:^|\n)(\s*)([^\n]*[=<>≤≥≠][^\n]*)(?=\s*$|\n)',
+                    lambda m: f'\n{m.group(1)}$${m.group(2)}$$\n' if any(op in m.group(2) for op in ['\\frac', '\\sqrt', '^', '_']) else m.group(0),
                     repaired
                 )
             
-            # 修复破损的LaTeX语法，但不改变其在文本中的位置
+            # 修复已有的LaTeX语法错误
+            
             # 修复缺失的大括号
-            repaired = re.sub(r'\\frac\s*([^{])', r'\\frac{\1', repaired)
-            repaired = re.sub(r'\\sqrt\s*([^{])', r'\\sqrt{\1', repaired)
+            repaired = re.sub(r'\\frac\s*([^{\s])([^{\s]*)', r'\\frac{\1\2}', repaired)
+            repaired = re.sub(r'\\sqrt\s*([^{\s])([^{\s]*)', r'\\sqrt{\1\2}', repaired)
             
-            # 修复破损的分数表达式
-            repaired = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}(?!\})', lambda m: f'\\frac{{{m.group(1)}}}{{{m.group(2)}}}', repaired)
+            # 修复不完整的分数表达式
+            repaired = re.sub(r'\\frac\{([^}]*)\}([^{])', r'\\frac{\1}{\2}', repaired)
             
-            # 清理多余的转义字符
-            repaired = re.sub(r'\\+([{}])', r'\\\1', repaired)
+            # 修复破损的数学分隔符
+            repaired = re.sub(r'\\\}\s*[-\\]*\s*\\\]', '', repaired)
+            repaired = re.sub(r'\{(\d+)\}\{(\d+)\s*imes\s*(\d+)\}', r'{\1 \\times \2 \\times \3}', repaired)
             
-            # 修复破损的数学分隔符 - 这是您截图中的问题
-            repaired = re.sub(r'\\\}\s*-\s*\\\]', '', repaired)  # 移除破损的分隔符
-            repaired = re.sub(r'\\\}\s*\\-\s*\\\]', '', repaired)  # 另一种形式
-            repaired = re.sub(r'\{(\d+)\}\{(\d+)\s*imes\s*(\d+)\}', r'{\1 \times \2 \times \3}', repaired)
+            # 确保数学公式的正确间距
+            # 行内公式前后保持适当空格
+            repaired = re.sub(r'([\u4e00-\u9fa5a-zA-Z])\$(\$?[^$]+\$?)\$([\u4e00-\u9fa5a-zA-Z])', r'\1 $\2$ \3', repaired)
             
-            # 注意：完整数学等式的识别已在上面的块级处理中完成，避免重复匹配
+            # 块级公式前后保持换行
+            repaired = re.sub(r'([^\n])\$\$([^$]+)\$\$([^\n])', r'\1\n$$\2$$\n\3', repaired)
             
-            # 移除数学公式前后不必要的换行（关键修复）
-            # 避免数学公式被强制单独成行
-            repaired = re.sub(r'\n+(\$[^$]+\$)\n+', r' \1 ', repaired)  # 行内公式
-            repaired = re.sub(r'\n{3,}(\$\$[^$]+\$\$)\n{3,}', r'\n\n\1\n\n', repaired)  # 块级公式
+            # 清理多余的空行
+            repaired = re.sub(r'\n{3,}', '\n\n', repaired)
             
-            self.logger.debug("Math format repair completed - preserving inline positioning")
+            self.logger.debug("Math format repair completed - strict KaTeX compliance")
             return repaired
             
         except Exception as e:
