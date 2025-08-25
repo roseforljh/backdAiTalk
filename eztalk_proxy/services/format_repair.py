@@ -447,6 +447,56 @@ class AIOutputFormatRepair:
             self.logger.error(f"Error in enhanced code repair: {e}")
             return text
     
+    def _repair_table_format(self, text: str) -> str:
+        """Fixes markdown tables with inconsistent column counts."""
+        # This regex finds potential markdown tables (header + separator + at least one row)
+        table_regex = re.compile(
+            r"(^\|(?:.*\|)+.*$\n"  # Header line
+            r"^\s*\|(?:\s*:?-+:?\s*\|)+.*$\n"  # Separator line
+            r"(?:^\|(?:.*\|)+.*$\n?)+)",  # One or more data rows
+            re.MULTILINE
+        )
+
+        def fix_table_match(match):
+            table_text = match.group(0)
+            lines = table_text.strip().split('\n')
+            
+            if len(lines) < 2:
+                return table_text # Not a valid table
+
+            header = lines[0]
+            # Split and filter out empty strings from start/end pipes
+            header_cells = [c.strip() for c in header.strip().strip('|').split('|')]
+            col_count = len(header_cells)
+            
+            if col_count == 0:
+                return table_text # No columns found
+
+            # Rebuild table with consistent column count
+            new_table_lines = []
+            
+            # Add header
+            new_table_lines.append('| ' + ' | '.join(header_cells) + ' |')
+            
+            # Add new separator
+            new_table_lines.append('|' + ' --- |' * col_count)
+            
+            # Add data rows (from line 2 onwards, as line 1 is the original separator)
+            for row_line in lines[2:]:
+                cells = [c.strip() for c in row_line.strip().strip('|').split('|')]
+                while len(cells) < col_count:
+                    cells.append('') # Pad
+                cells = cells[:col_count] # Truncate
+                new_table_lines.append('| ' + ' | '.join(cells) + ' |')
+            
+            return '\n'.join(new_table_lines)
+
+        try:
+            return table_regex.sub(fix_table_match, text)
+        except Exception as e:
+            self.logger.warning(f"Failed to repair table format: {e}")
+            return text
+
     def _repair_general_format(self, text: str) -> str:
         """通用格式修复 - 增强版Markdown格式修复"""
         repaired = text
@@ -498,6 +548,8 @@ class AIOutputFormatRepair:
         if self.config.enable_markdown_repair:
             # 确保表格行的格式正确
             repaired = re.sub(r'^\|(.+)\|$', r'| \1 |', repaired, flags=re.MULTILINE)
+            # 智能修复表格列数不一致的问题
+            repaired = self._repair_table_format(repaired)
 
         # 修复段落换行：将非特殊行后的单个换行符视作段落分隔
         if self.config.enable_markdown_repair:
