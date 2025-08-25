@@ -5,7 +5,7 @@ services:
     build: .
     container_name: eztalk-proxy
     ports:
-      - "${PORT:-7860}:7860"
+      - "0.0.0.0:${PORT:-7860}:7860"
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - GOOGLE_CSE_ID=${GOOGLE_CSE_ID}

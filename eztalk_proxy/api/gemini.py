@@ -388,6 +388,7 @@ async def handle_gemini_request(
                                         openai_like_sse = {"id": f"gemini-{request_id}", "choices": [choice]}
                                         async for event in process_openai_like_sse_stream(openai_like_sse, processing_state, request_id):
                                             yield await sse_event_serializer_rest(AppStreamEventPy(**event))
+                                            await asyncio.sleep(0)  # Force flush
 
                         except orjson.JSONDecodeError:
                             logger.warning(f"{log_prefix}: Skipping non-JSON line in Gemini stream: {line}")
