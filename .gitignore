@@ -48,6 +48,17 @@ coverage.xml
 
 *.log
 local_settings.py
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Docker Compose override
+docker-compose.override.yml
+
+# Temporary uploads
+temp_uploads/
 db.sqlite3
 db.sqlite3-journal
 

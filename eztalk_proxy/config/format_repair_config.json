@@ -5,7 +5,7 @@
   "enable_json_repair": true,
   "enable_math_repair": false,
   "enable_markdown_repair": false,
-  "enable_code_repair": false,
+  "enable_code_repair": true,
   "enable_xml_html_repair": false,
   "enable_structure_repair": false,
   "enable_resume_repair": true,

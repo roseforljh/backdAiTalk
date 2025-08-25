@@ -401,27 +401,50 @@ class AIOutputFormatRepair:
             return text
     
     def _repair_code_format(self, text: str) -> str:
-        """修复代码格式"""
+        """修复代码格式 - 增强版"""
         if not self.config.enable_code_repair:
             return text
-            
+
         try:
             repaired = text
+
+            # 1. 确保 ``` 独占一行且前后有换行，清理语言标识符
+            # 将 ```python code... ``` 转换为 ```python\ncode...\n```
+            def replacer(m):
+                lang = m.group(1).strip().lower() if m.group(1) else 'text'
+                code = m.group(2).strip()
+                return f"```{lang}\n{code}\n```"
             
-            # 修复不完整的代码块
-            repaired = re.sub(r'```(\w*)\n(.*?)(?!```)', r'```\1\n\2\n```', repaired, flags=re.DOTALL)
-            
-            # 修复行内代码
-            repaired = re.sub(r'`([^`\n]+)(?!`)', r'`\1`', repaired)
-            
-            # 修复缺失语言标识的代码块
-            repaired = re.sub(r'```\n(.*?)\n```', r'```text\n\1\n```', repaired, flags=re.DOTALL)
-            
-            self.logger.debug("Code format repair completed")
+            # 这个正则处理 ```lang content ``` 在同一行的情况
+            repaired = re.sub(r'```\s*(\S*)\s*([^\n`]+?)\s*```', replacer, repaired)
+
+            # 2. 修复缺失语言标识的代码块，并确保换行
+            # 匹配没有语言标识的 ```\n content \n```
+            repaired = re.sub(r'(?<!`)```\n([\s\S]+?)\n```(?!`)', r'```text\n\1\n```', repaired)
+            # 匹配紧凑的 ```content```
+            repaired = re.sub(r'(?<!`)```([^\n`]+?)```(?!`)', r'```text\n\1\n```', repaired)
+
+
+            # 3. 检查并修复未闭合的代码块
+            if repaired.count('```') % 2 != 0:
+                # 如果最后一个 ``` 后面有内容，则认为它是未闭合的
+                last_marker = repaired.rfind('```')
+                if last_marker != -1:
+                    content_after_last_marker = repaired[last_marker + 3:]
+                    if content_after_last_marker.strip():
+                         if not repaired.endswith('\n'):
+                            repaired += '\n'
+                         repaired += '```'
+                         self.logger.debug("Added missing code block closing tag at the end.")
+
+            # 4. 修复行内代码 - 更保守的方式
+            repaired = re.sub(r'`([^`\n]{1,100})$', r'`\1`', repaired, flags=re.MULTILINE)
+
+            self.logger.debug("Enhanced code format repair completed")
             return repaired
-            
+
         except Exception as e:
-            self.logger.error(f"Error in code repair: {e}")
+            self.logger.error(f"Error in enhanced code repair: {e}")
             return text
     
     def _repair_general_format(self, text: str) -> str:
@@ -432,9 +455,6 @@ class AIOutputFormatRepair:
         if self.config.enable_markdown_repair and self.config.markdown_fix_headers:
             # 修复标题格式：确保#后面有空格
             repaired = re.sub(r'^(#{1,6})([^#\s])', r'\1 \2', repaired, flags=re.MULTILINE)
-            # 修复标题前后的换行
-            repaired = re.sub(r'([^\n])\n(#{1,6} .+)', r'\1\n\n\2', repaired)
-            repaired = re.sub(r'(#{1,6} .+)\n([^\n#])', r'\1\n\n\2', repaired)
         
         # 修复列表格式 - 增强版
         if self.config.enable_markdown_repair and self.config.markdown_fix_lists:
@@ -478,7 +498,39 @@ class AIOutputFormatRepair:
         if self.config.enable_markdown_repair:
             # 确保表格行的格式正确
             repaired = re.sub(r'^\|(.+)\|$', r'| \1 |', repaired, flags=re.MULTILINE)
-        
+
+        # 修复段落换行：将非特殊行后的单个换行符视作段落分隔
+        if self.config.enable_markdown_repair:
+            # 将连续的多个换行符合并为两个，形成段落
+            repaired = re.sub(r'\n{3,}', '\n\n', repaired)
+            # 将前面不是特殊字符（如列表符、标题符）的单个换行符替换为两个，强制分段
+            repaired = re.sub(r'(?<=[^\n#*\->|])\n(?=[^\n#*\->|])', '\n\n', repaired)
+
+        # 强制确保所有块级元素（标题、列表、引用、代码块、水平线）前后都有空行
+        # 这是最健壮的修复方式，可以解决大部分Markdown渲染问题
+        if self.config.enable_markdown_repair:
+            # 识别所有主要的块级元素
+            block_pattern = re.compile(
+                r"^\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>\s*|```|---|\|)"
+            )
+
+            lines = repaired.split('\n')
+            result_lines = []
+            if lines:
+                for i, line in enumerate(lines):
+                    is_block = block_pattern.match(line)
+                    if is_block and i > 0 and result_lines and result_lines[-1].strip() != "":
+                        # 如果当前行是块级元素，不是第一行，并且
+                        # 前面的结果行不为空，则在此行前添加一个空行。
+                        result_lines.append("")
+                    
+                    result_lines.append(line)
+            
+            repaired = "\n".join(result_lines)
+            
+            # 再次清理可能产生的多余空行
+            repaired = re.sub(r'\n{3,}', '\n\n', repaired)
+
         return repaired
 
     def _repair_resume_format(self, text: str) -> str:
