@@ -260,7 +260,8 @@ async def handle_gemini_request(
     try:
         target_url, headers, json_payload = prepare_gemini_rest_api_request(
             chat_input=gemini_chat_input.model_copy(update={'messages': active_messages_for_llm}),
-            request_id=request_id
+            request_id=request_id,
+           system_prompt=gemini_chat_input.system_prompt
         )
     except Exception as prep_error:
         logger.error(f"{log_prefix}: Request preparation error: {prep_error}", exc_info=True)

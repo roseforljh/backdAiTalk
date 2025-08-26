@@ -461,7 +461,8 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
             current_api_url, current_api_headers, current_api_payload = prepare_openai_request(
                 request_data=chat_input,
                 processed_messages=final_messages_for_llm,
-                request_id=request_id
+                request_id=request_id,
+               system_prompt=chat_input.system_prompt
             )
 
             final_api_url = current_api_url

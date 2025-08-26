@@ -99,6 +99,7 @@ class ChatRequestModel(BaseModel):
     tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(None, alias="toolChoice")
     use_web_search: Optional[bool] = Field(None, alias="use_web_search")
     qwen_enable_search: Optional[bool] = Field(None, alias="qwenEnableSearch")
+    system_prompt: Optional[str] = Field(None, alias="systemPrompt")
 
     custom_model_parameters: Optional[Dict[str, Any]] = Field(None, alias="customModelParameters")
     custom_extra_body: Optional[Dict[str, Any]] = Field(None, alias="customExtraBody")

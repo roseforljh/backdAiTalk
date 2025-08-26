@@ -96,7 +96,8 @@ def is_gemini_model_in_openai_format(model_name: str) -> bool:
 def prepare_openai_request(
     request_data: ChatRequestModel,
     processed_messages: List[Dict[str, Any]],
-    request_id: str
+    request_id: str,
+   system_prompt: Optional[str] = None
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     base_url = (request_data.api_address or DEFAULT_OPENAI_API_BASE_URL).strip().rstrip('/')
     target_url = urljoin(f"{base_url}/", OPENAI_COMPATIBLE_PATH.lstrip('/'))
@@ -109,6 +110,8 @@ def prepare_openai_request(
 
     # 添加格式化系统prompt
     final_messages = add_system_prompt_if_needed(copy.deepcopy(processed_messages), request_id)
+    if system_prompt:
+       final_messages.insert(0, {"role": "system", "content": system_prompt})
     model_name_lower = request_data.model.lower()
 
     payload: Dict[str, Any] = {
@@ -267,7 +270,8 @@ def add_system_prompt_to_gemini_messages(messages: List[PartsApiMessagePy], requ
 
 def prepare_gemini_rest_api_request(
     chat_input: ChatRequestModel,
-    request_id: str
+    request_id: str,
+   system_prompt: Optional[str] = None
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     log_prefix = f"RID-{request_id}"
     logger.info(f"{log_prefix}: Preparing Gemini REST API request for model {chat_input.model}.")
@@ -332,6 +336,8 @@ def prepare_gemini_rest_api_request(
         json_payload["contents"] = []
     else:
         json_payload["contents"] = convert_parts_messages_to_rest_api_contents(messages_to_convert_or_use, request_id)
+    if system_prompt:
+        json_payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
 
 
