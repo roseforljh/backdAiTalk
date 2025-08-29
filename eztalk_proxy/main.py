@@ -12,6 +12,7 @@ from .core.config import (
     TEMP_UPLOAD_DIR
 )
 from .api import chat as chat_router
+from .api import image_generation as image_generation_router
 
 numeric_log_level = getattr(logging, LOG_LEVEL_FROM_ENV.upper(), logging.INFO)
 logging.basicConfig(
@@ -99,6 +100,9 @@ logger.info(f"FastAPI EzTalk Proxy v{APP_VERSION} 初始化完成，已配置COR
 
 app.include_router(chat_router.router)
 logger.info("聊天路由已加载到路径 /api/v1/chat (或其他在chat_router中定义的路径)")
+
+app.include_router(image_generation_router.router)
+logger.info("图像生成路由已加载到路径 /images/generations")
 
 
 @app.get("/", status_code=200, include_in_schema=False, tags=["Utilities"])

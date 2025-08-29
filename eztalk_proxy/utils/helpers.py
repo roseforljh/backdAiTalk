@@ -7,8 +7,10 @@ import os
 import uuid
 
 from fastapi.responses import JSONResponse
-from fastapi import UploadFile
-
+from fastapi import UploadFile, Depends
+from fastapi.security import OAuth2PasswordBearer
+from ..models.api_models import User
+ 
 from ..core.config import (
     COMMON_HEADERS,
     MAX_SSE_LINE_LENGTH,
@@ -270,3 +272,10 @@ async def upload_to_gcs(
     except Exception as e:
         logger.error(f"{log_prefix} GCS upload failed for '{original_filename}' (blob '{destination_blob_name}'): {e}", exc_info=True)
         return None
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+   # In a real application, you would verify the token and fetch the user from a database.
+   # For now, we'll just return a dummy user.
+   return User(username="johndoe", email="johndoe@example.com", full_name="John Doe")

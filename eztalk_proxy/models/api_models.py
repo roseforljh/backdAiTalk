@@ -126,3 +126,8 @@ class AppStreamEventPy(BaseModel):
     timestamp: Optional[str] = None
     web_search_results: Optional[List[WebSearchResult]] = Field(None, alias="webSearchResults")
     model_config = {"populate_by_name": True}
+
+class User(BaseModel):
+   username: str
+   email: Optional[str] = None
+   full_name: Optional[str] = None
