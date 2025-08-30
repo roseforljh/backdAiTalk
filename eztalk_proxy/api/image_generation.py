@@ -46,7 +46,16 @@ def _normalize_response(data: Dict[str, Any]) -> ImageGenerationResponse:
 
     # Case 1: Provider wraps Gemini image response in an OpenAI chat completion format.
     if "choices" in data and isinstance(data.get("choices"), list) and data["choices"]:
-        message = data["choices"][0].get("message", {})
+        choice = data["choices"][0]
+        if choice.get("finish_reason") == "content_filter":
+            return ImageGenerationResponse(
+                images=[],
+                text="[CONTENT_FILTER]您的请求可能违反了相关的内容安全策略，已被拦截。请修改您的提示后重试。",
+                timings={"inference": 0},
+                seed=random.randint(1, 2**31 - 1)
+            )
+
+        message = choice.get("message", {})
         content = message.get("content", "")
         if isinstance(content, str):
             # Regex to find markdown image syntax with data URI or standard URL
@@ -141,9 +150,11 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
             for part in request.contents:
                 if "text" in part:
                     text_prompt = part["text"]
-            
+
             if text_prompt:
-                content_parts.append({"type": "text", "text": text_prompt})
+                # 轻量级指令，以用户输入为主
+                enhanced_text_prompt = f"{text_prompt}\n\n---\n instruction: Edit the provided image based on the text description above. Output only the edited image."
+                content_parts.append({"type": "text", "text": enhanced_text_prompt})
 
             for part in request.contents:
                  if "inline_data" in part:
@@ -161,7 +172,8 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
                 "stream": False
             }
         else:
-            enhanced_prompt = f"请创作一幅关于以下主题的、高质量的、富有创意的图片：{request.prompt}"
+            # 轻量级指令，以用户输入为主
+            enhanced_prompt = f"{request.prompt}\n\n---\nInstruction: Generate a high-quality image based on the description above. Output the image directly."
             payload = {
                 "model": request.model,
                 "messages": [{"role": "user", "content": enhanced_prompt}],
