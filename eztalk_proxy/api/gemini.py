@@ -366,7 +366,23 @@ async def handle_gemini_request(
                                 else:
                                     delta = {}
                                     for part in content_parts:
-                                        if "text" in part:
+                                        if "inlineData" in part:
+                                            mime_type = part["inlineData"].get("mimeType")
+                                            base64_data = part["inlineData"].get("data")
+                                            if mime_type and base64_data:
+                                                image_url = f"data:{mime_type};base64,{base64_data}"
+                                                yield await sse_event_serializer_rest(AppStreamEventPy(
+                                                    type="image_generation",
+                                                    image_url=image_url
+                                                ))
+                                                # Finish the stream after sending the image
+                                                yield await sse_event_serializer_rest(AppStreamEventPy(
+                                                    type="finish",
+                                                    reason="image_generated",
+                                                    timestamp=get_current_time_iso()
+                                                ))
+                                                return # Stop further processing
+                                        elif "text" in part:
                                             text_chunk = part["text"]
                                             logger.debug(f"{log_prefix}: Processing text chunk of length {len(text_chunk)}")
                                             logger.debug(f"{log_prefix}: Text chunk preview: {repr(text_chunk[:100])}")

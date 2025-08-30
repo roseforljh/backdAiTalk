@@ -504,6 +504,18 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
                                         # The problematic markdown cleaning logic for non-Gemini models has been removed
                                         # to prevent corruption of formatted text like code or LaTeX.
                                         
+                                        if "gemini-2.5-flash-image-preview" in chat_input.model.lower():
+                                            try:
+                                                content = sse_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                                if content:
+                                                    image_data = orjson.loads(content)
+                                                    image_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
+                                                    if "url" in image_data or "b64_json" in image_data:
+                                                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="image_generation", image_url=image_url).model_dump(by_alias=True, exclude_none=True))
+                                                        sse_data["choices"][0]["delta"]["content"] = "" # Clear content to avoid text rendering
+                                            except (orjson.JSONDecodeError, IndexError):
+                                                pass # Not an image JSON, process as text
+
                                         async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id, chat_input):
                                             yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
                                     except (orjson.JSONDecodeError, UnicodeDecodeError) as e:

@@ -98,7 +98,7 @@ def get_current_time_iso() -> str:
 def is_gemini_2_5_model(model_name: str) -> bool:
     if not isinstance(model_name, str):
         return False
-    return "gemini-2.5" in model_name.lower()
+    return "gemini-2.5" in model_name.lower() or "gemini-2.5-flash-image-preview" in model_name.lower()
 
 def _extract_text_from_pdf_pypdf2(file_path: str) -> Optional[str]:
     if not PyPDF2:
