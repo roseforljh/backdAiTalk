@@ -66,7 +66,7 @@ def _normalize_response(data: Dict[str, Any]) -> ImageGenerationResponse:
             
             # Clean the image markdown from the text to get remaining text
             text_content = re.sub(r"!\[.*?\]\((data:image/[^;]+;base64,[^\s\)\"]+|https?://[^\s\)]+)\)", "", content).strip()
-            if text_content:
+            if text_content and text_content != '`':
                 text_parts.append(text_content)
         elif isinstance(content, list): # Handle list content (e.g. for Gemini Vision)
             for part in content:
@@ -76,7 +76,14 @@ def _normalize_response(data: Dict[str, Any]) -> ImageGenerationResponse:
                     image_url_data = part.get("image_url", {})
                     if isinstance(image_url_data, dict) and "url" in image_url_data:
                          images_list.append({"url": image_url_data["url"]})
-
+        
+        # Case 1.5: Handle OpenRouter's non-standard format for Gemini Image
+        if not images_list and "images" in message and isinstance(message.get("images"), list):
+            for img_item in message["images"]:
+                if isinstance(img_item, dict) and img_item.get("type") == "image_url":
+                    img_url_data = img_item.get("image_url", {})
+                    if isinstance(img_url_data, dict) and "url" in img_url_data:
+                        images_list.append({"url": img_url_data["url"]})
 
     # Case 2: Gemini's native format
     elif "candidates" in data and isinstance(data["candidates"], list):
@@ -140,24 +147,32 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
     }
     payload = {}
 
-    if "gemini" in request.model.lower():
+    model_lower = request.model.lower()
+    is_gemini_image_model = "gemini" in model_lower and ("flash-image" in model_lower or "gemini-pro-vision" in model_lower)
+
+    if is_gemini_image_model:
         if "/images/generations" in url:
             url = url.replace("/images/generations", "/chat/completions")
 
         content_parts = []
-        if request.contents:
+        # 图像生成或编辑的核心逻辑
+        if request.contents: # 这是图像编辑模式
             text_prompt = ""
+            # 首先找到文本部分
             for part in request.contents:
-                if "text" in part:
+                if "text" in part and part["text"]:
                     text_prompt = part["text"]
-
+                    break
+            
+            # OpenRouter文档要求文本部分在前
             if text_prompt:
-                # 轻量级指令，以用户输入为主
-                enhanced_text_prompt = f"{text_prompt}\n\n---\n instruction: Edit the provided image based on the text description above. Output only the edited image."
-                content_parts.append({"type": "text", "text": enhanced_text_prompt})
-
+                content_parts.append({"type": "text", "text": text_prompt})
+            else: # 如果没有文本，提供一个默认的
+                content_parts.append({"type": "text", "text": "Edit the image."})
+            
+            # 然后添加图像部分
             for part in request.contents:
-                 if "inline_data" in part:
+                if "inline_data" in part:
                     inline_data = part["inline_data"]
                     mime_type = inline_data.get("mime_type", "image/jpeg")
                     b64_data = inline_data.get("data", "")
@@ -166,17 +181,17 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
                             "type": "image_url",
                             "image_url": {"url": f"data:{mime_type};base64,{b64_data}"}
                         })
+            
             payload = {
                 "model": request.model,
                 "messages": [{"role": "user", "content": content_parts}],
                 "stream": False
             }
-        else:
-            # 轻量级指令，以用户输入为主
-            enhanced_prompt = f"{request.prompt}\n\n---\nInstruction: Generate a high-quality image based on the description above. Output the image directly."
+        else: # 这是纯文本图像生成模式
+            # 对于纯文本生成，我们直接将prompt作为内容
             payload = {
                 "model": request.model,
-                "messages": [{"role": "user", "content": enhanced_prompt}],
+                "messages": [{"role": "user", "content": request.prompt}],
                 "stream": False
             }
     else:
@@ -191,6 +206,7 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
     payload = {k: v for k, v in payload.items() if v is not None}
 
     logger.info(f"[IMG] Proxying to upstream: {url} | model={payload.get('model')} | size={payload.get('image_size')} | batch={payload.get('batch_size')} | steps={payload.get('num_inference_steps')} | guidance={payload.get('guidance_scale')}")
+    logger.debug(f"[IMG] Upstream payload: {payload}")
  
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0), http2=True, follow_redirects=True) as client:
@@ -208,14 +224,17 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
 
     try:
         raw = resp.json()
-        logger.info(f"[IMG] Upstream RAW response from provider: {raw}")
+        # 日志记录截断的响应，避免日志过长
+        raw_for_log = str(raw)
+        log_preview = raw_for_log[:1000] + ('...' if len(raw_for_log) > 1000 else '')
+        logger.info(f"[IMG] Upstream RAW response from provider (preview): {log_preview}")
     except Exception as e:
         logger.error(f"[IMG] Upstream returned non-JSON body: {e}. Body preview: {resp.text[:500]}", exc_info=True)
         return _fallback_response(f"non_json_upstream: {e}")
 
     try:
         normalized = _normalize_response(raw)
-        logger.info("[IMG] Image generation normalized successfully")
+        logger.info(f"[IMG] Image generation normalized successfully. Text: {normalized.text}, Images: {len(normalized.images)}")
         return normalized
     except Exception as e:
         logger.error(f"[IMG] Failed to normalize upstream response: {e}. Raw keys: {list(raw) if isinstance(raw, dict) else type(raw)}", exc_info=True)
