@@ -10,11 +10,12 @@ from pydantic import ValidationError
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-def _fallback_response(reason: str) -> ImageGenerationResponse:
+def _fallback_response(reason: str, user_text: str = None) -> ImageGenerationResponse:
     # 统一的兜底结构，避免前端反序列化报缺少必填字段
     logger.error(f"[IMG] Fallback response due to error: {reason}")
     return ImageGenerationResponse(
         images=[],
+        text=user_text,
         timings={"inference": 0},
         seed=random.randint(1, 2**31 - 1)
     )
@@ -68,14 +69,40 @@ def _normalize_response(data: Dict[str, Any]) -> ImageGenerationResponse:
             text_content = re.sub(r"!\[.*?\]\((data:image/[^;]+;base64,[^\s\)\"]+|https?://[^\s\)]+)\)", "", content).strip()
             if text_content and text_content != '`':
                 text_parts.append(text_content)
-        elif isinstance(content, list): # Handle list content (e.g. for Gemini Vision)
+        elif isinstance(content, list): # Handle list content (e.g. for Gemini Vision / OpenAI-compat multimodal)
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type")
+                # 文本
+                if ptype == "text" and isinstance(part.get("text"), str):
                     text_parts.append(part.get("text", ""))
-                if isinstance(part, dict) and part.get("type") == "image_url":
+                # OpenAI 兼容 image_url
+                elif ptype == "image_url":
                     image_url_data = part.get("image_url", {})
                     if isinstance(image_url_data, dict) and "url" in image_url_data:
-                         images_list.append({"url": image_url_data["url"]})
+                        images_list.append({"url": image_url_data["url"]})
+                # inline_data / inlineData（常见于Gemini返回或部分中转商）
+                elif ptype in ("inline_data", "inlineData"):
+                    data_obj = part.get("inline_data") or part.get("inlineData") or {}
+                    if isinstance(data_obj, dict) and isinstance(data_obj.get("data"), str):
+                        mime = data_obj.get("mime_type") or data_obj.get("mimeType") or "image/png"
+                        images_list.append({"url": f"data:{mime};base64,{data_obj['data']}"})
+                # image + b64_json/data
+                elif ptype in ("image", "image_base64"):
+                    img_obj = part.get("image", {})
+                    if isinstance(img_obj, dict):
+                        if isinstance(img_obj.get("b64_json"), str):
+                            images_list.append({"url": f"data:image/png;base64,{img_obj['b64_json']}"})
+                        elif isinstance(img_obj.get("data"), str):
+                            data_val = img_obj["data"]
+                            if data_val.startswith("data:image/"):
+                                images_list.append({"url": data_val})
+                            else:
+                                images_list.append({"url": f"data:image/png;base64,{data_val}"})
+                # 一些中转商可能直接把 data URI 放在字段 url 上
+                elif isinstance(part.get("url"), str) and part["url"].startswith(("http://", "https://", "data:image/")):
+                    images_list.append({"url": part["url"]})
         
         # Case 1.5: Handle OpenRouter's non-standard format for Gemini Image
         if not images_list and "images" in message and isinstance(message.get("images"), list):
@@ -106,7 +133,22 @@ def _normalize_response(data: Dict[str, Any]) -> ImageGenerationResponse:
         elif "image" in data: # Fallback for single image field
              images_list = _as_image_urls([data["image"]] if data["image"] else [])
 
-    if not images_list and not text_parts:
+    # Consolidate text and check for image generation failure patterns
+    final_text = " ".join(text_parts).strip()
+    if not images_list and final_text:
+        # Common phrases indicating an intended but failed image generation
+        failure_patterns = [
+            "好的，这是", "好的，这是您要的", "这是您要的图片", "生成的图片如下", "这是我为您生成的",
+            "here is the image", "here are the images", "i have generated", "voici l'image", "ecco l'immagine"
+        ]
+        # Use lowercasing for case-insensitive matching
+        final_text_lower = final_text.lower()
+        if any(p.lower() in final_text_lower for p in failure_patterns):
+            # Append a user-friendly message about the potential failure
+            failure_message = "\n\n(图片生成失败或被模型拒绝。请稍后重试或更换提示词。)"
+            final_text += failure_message
+
+    if not images_list and not final_text:
         raise ValueError("Downstream API did not return any recognizable images or text field")
 
     # Timings and Seed logic remains the same
@@ -133,7 +175,7 @@ def _normalize_response(data: Dict[str, Any]) -> ImageGenerationResponse:
 
     normalized = {
         "images": images_list,
-        "text": " ".join(text_parts) if text_parts else None,
+        "text": final_text if final_text else None,
         "timings": timings_obj,
         "seed": seed_val
     }
@@ -185,14 +227,17 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
             payload = {
                 "model": request.model,
                 "messages": [{"role": "user", "content": content_parts}],
-                "stream": False
+                "stream": False,
+                "modalities": ["image"]
             }
         else: # 这是纯文本图像生成模式
-            # 对于纯文本生成，我们直接将prompt作为内容
+            # 使用多模态 parts 格式并显式声明 modalities，以触发中转商的图片输出
+            content_parts = [{"type": "text", "text": request.prompt or ""}]
             payload = {
                 "model": request.model,
-                "messages": [{"role": "user", "content": request.prompt}],
-                "stream": False
+                "messages": [{"role": "user", "content": content_parts}],
+                "stream": False,
+                "modalities": ["image"]
             }
     else:
         payload = request.model_dump(exclude={"apiAddress", "apiKey", "contents"})
@@ -213,14 +258,37 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
             resp = await client.post(url, headers=headers, json=payload)
     except httpx.RequestError as e:
         logger.error(f"[IMG] Upstream request error to {url}: {e}", exc_info=True)
-        return _fallback_response(f"request_error: {e}")
+        return _fallback_response(f"request_error: {e}", user_text="网络异常：无法连接上游服务，请稍后重试。")
 
     # 非 2xx：将上游响应体传回，便于前端/日志定位
     if resp.status_code < 200 or resp.status_code >= 300:
         text_preview = resp.text[:1000] if resp.text else "(empty)"
         logger.error(f"[IMG] Upstream non-2xx {resp.status_code}. Body preview: {text_preview}")
+        # 将上游错误提示透传给前端（例如地区限制）
+        user_text = None
+        try:
+            err_json = resp.json()
+            err_obj = err_json.get("error", {}) if isinstance(err_json, dict) else {}
+            raw_msg = err_obj.get("message")
+            raw_embedded = None
+            meta = err_obj.get("metadata") if isinstance(err_obj, dict) else None
+            if isinstance(meta, dict):
+                raw_embedded = meta.get("raw")
+            candidate_texts = [raw_msg, raw_embedded, text_preview]
+            for ct in candidate_texts:
+                if isinstance(ct, str) and ct:
+                    if "User location is not supported" in ct or "FAILED_PRECONDITION" in ct:
+                        user_text = "区域限制：上游拒绝该模型的调用。请更换可用地区节点/供应商，或选择其他模型。"
+                        break
+            if user_text is None and isinstance(raw_msg, str) and raw_msg:
+                user_text = f"上游错误（{resp.status_code}）：{raw_msg}"
+        except Exception:
+            if "User location is not supported" in text_preview:
+                user_text = "区域限制：上游拒绝该模型的调用。请更换可用地区节点/供应商，或选择其他模型。"
+            else:
+                user_text = f"上游错误（{resp.status_code}）：{text_preview}"
         # 返回兜底结构（HTTP 200 由路由层自动处理，因为我们返回模型对象）
-        return _fallback_response(f"upstream_{resp.status_code}: {text_preview}")
+        return _fallback_response(f"upstream_{resp.status_code}: {text_preview}", user_text=user_text)
 
     try:
         raw = resp.json()
@@ -230,7 +298,7 @@ async def _proxy_and_normalize(request: ImageGenerationRequest) -> ImageGenerati
         logger.info(f"[IMG] Upstream RAW response from provider (preview): {log_preview}")
     except Exception as e:
         logger.error(f"[IMG] Upstream returned non-JSON body: {e}. Body preview: {resp.text[:500]}", exc_info=True)
-        return _fallback_response(f"non_json_upstream: {e}")
+        return _fallback_response(f"non_json_upstream: {e}", user_text=f"上游返回非JSON响应：{str(e)}")
 
     try:
         normalized = _normalize_response(raw)
