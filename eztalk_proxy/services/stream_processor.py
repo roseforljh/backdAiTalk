@@ -13,7 +13,13 @@ from .format_repair import format_repair_service
 logger = logging.getLogger("EzTalkProxy.StreamProcessors")
 
 MIN_REASONING_FLUSH_CHUNK_SIZE = 1
-MIN_CONTENT_FLUSH_CHUNK_SIZE = 5  # 降低阈值，确保更小的内容块也能及时发送
+MIN_CONTENT_FLUSH_CHUNK_SIZE = 80  # 提高阈值，避免过于频繁的刷新
+
+# 简单判断当前是否处于未闭合的代码围栏中（``` 计数为奇数）
+def _inside_code_fence(text: str) -> bool:
+    if not text:
+        return False
+    return text.count('```') % 2 == 1
 
 def preprocess_ai_output_content(content: str, request_id: str) -> str:
     """
@@ -247,7 +253,6 @@ async def process_openai_like_sse_stream(
             state["ai_raw_output_log"].append(raw_output_record)
             
             logger.info(f"{log_prefix}: AI_RAW_OUTPUT chunk #{state['content_chunks_received']}: length={len(content_str)}, content={repr(content_str[:100])}")
-            logger.info(f"{log_prefix}: AI_RAW_OUTPUT whitespace: newlines={raw_output_record['whitespace_analysis']['newlines']}, spaces={raw_output_record['whitespace_analysis']['spaces']}, consecutive_newlines={raw_output_record['whitespace_analysis']['consecutive_newlines']}")
             
             # 检查是否需要从content中提取<think>标签
             if extract_think_tags_enabled and content_str:
@@ -273,7 +278,7 @@ async def process_openai_like_sse_stream(
                 # 使用提取后的实际内容进行后续处理
                 content_str = actual_content
             
-            # 处理AI输出内容，并进行格式修复
+            # 处理AI输出内容，并进行更保守的流式处理
             if content_str:
                 # 记录变化前的状态
                 old_length = len(state["accumulated_content"])
@@ -291,14 +296,25 @@ async def process_openai_like_sse_stream(
                     yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                     state["reasoning_finish_event_sent"] = True
                 
-                # 简化后的刷新条件，确保流畅性
+                # 更保守的刷新条件：避免在代码块未闭合时刷新
                 accumulated_content = state["accumulated_content"]
-                if len(accumulated_content) >= MIN_CONTENT_FLUSH_CHUNK_SIZE or any(punct in accumulated_content for punct in ['.', '!', '?', '。', '！', '？', '\n']):
-                    # 对累积的内容进行格式修复
-                    content_to_send = format_repair_service.repair_ai_output(state["accumulated_content"], "general")
+                inside_code = _inside_code_fence(accumulated_content)
+                has_newline = '\n' in accumulated_content
+                has_sentence_end = any(punct in accumulated_content for punct in ['.', '!', '?', '。', '！', '？'])
+                large_enough = len(accumulated_content) >= MIN_CONTENT_FLUSH_CHUNK_SIZE
+                force_large_flush = len(accumulated_content) >= 200
+
+                should_flush = force_large_flush or (not inside_code and (has_newline or has_sentence_end) and large_enough)
+
+                if should_flush:
+                    # 根据配置决定是否在流式阶段进行修复
+                    if getattr(format_repair_service, 'config', None) and not format_repair_service.config.enable_realtime_repair:
+                        content_to_send = accumulated_content
+                    else:
+                        content_to_send = format_repair_service.repair_ai_output(accumulated_content, "general")
                     
-                    logger.info(f"{log_prefix}: CONTENT_FLUSH: Sending repaired content ({len(content_to_send)} chars)")
-                    logger.debug(f"{log_prefix}: Repaired content preview: {repr(content_to_send[:200])}")
+                    logger.info(f"{log_prefix}: CONTENT_FLUSH: Sending {'raw' if content_to_send is accumulated_content else 'repaired'} content ({len(content_to_send)} chars)")
+                    logger.debug(f"{log_prefix}: Content preview: {repr(content_to_send[:200])}")
                     
                     output_type = format_repair_service.detect_output_type(content_to_send)
                     yield {"type": "content", "text": content_to_send, "output_type": output_type, "timestamp": get_current_time_iso()}
@@ -319,7 +335,7 @@ async def process_openai_like_sse_stream(
                 logger.info(f"{log_prefix}: FINAL_CONTENT_FLUSH: Flushing remaining content ({len(state['accumulated_content'])} chars)")
                 logger.info(f"{log_prefix}: FINAL_CONTENT_PREVIEW: {repr(state['accumulated_content'][:200])}")
                 
-                # 对最后剩余的内容进行格式修复
+                # 对最后剩余的内容进行格式修复（最终阶段允许完整修复）
                 final_content_to_send = format_repair_service.repair_ai_output(state["accumulated_content"], "general")
                 logger.info(f"{log_prefix}: FINAL_CONTENT_FLUSH: Sending final repaired content ({len(final_content_to_send)} chars)")
                 output_type = format_repair_service.detect_output_type(final_content_to_send)

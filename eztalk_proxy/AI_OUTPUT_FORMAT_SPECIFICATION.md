@@ -285,3 +285,19 @@ $$\{2k\} = (2)^k = (-1)^k$$
 ---
 
 **注意**: 本规范会根据实际使用情况持续更新和完善。
+
+## 与前端转换逻辑对齐（Android Compose）
+为确保前端组件 EnhancedMarkdownText 与 CodePreview 无缝解析与预览，AI 输出需遵循以下补充细则：
+
+- 语言标识枚举（用于三反引号代码块）：html, svg, css, javascript, js, json, xml, mermaid, python, java, kotlin, cpp, c, bash, sql, yaml
+- 正文默认使用普通 Markdown；除非用户明确要求“预览 Markdown”，否则不要将正文放入 ```markdown/```md 代码块
+- 预览型语言要求：
+  - html：可输出完整页面或片段，片段无需自行添加 <!DOCTYPE>
+  - svg：根标签必须为 <svg>，不添加 XML 声明头
+  - css：仅输出纯 CSS 规则（不加 <style> 包裹）
+  - javascript/js：使用 console.log 展示结果，避免 alert/prompt、无限循环与敏感 API
+  - mermaid：首行需是 graph/flowchart/sequenceDiagram 等合法定义
+  - json：严格 JSON 语法（双引号/无多余逗号/括号匹配）
+- 数学：行内 $...$；块级 $$...$$；与 KaTeX 语法一致，美元符成对且不嵌套；块前后空行、行内前后空格
+- 表格：必须包含表头行 + 对齐分隔行 + 至少一行数据；列数对齐
+- 流式/分片纪律：代码块、数学块、表格必须原子输出，在同一轮完成开始与结束标记；若已开启 ```lang 必须在同一条消息闭合 ```
