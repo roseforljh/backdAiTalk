@@ -2,7 +2,7 @@ import orjson
 import logging
 import copy
 from typing import List, Dict, Any, Optional, Union, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from ..models.api_models import (
     ChatRequestModel,
@@ -120,9 +120,39 @@ def prepare_openai_request(
     request_id: str,
    system_prompt: Optional[str] = None
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
-    base_url = (request_data.api_address or DEFAULT_OPENAI_API_BASE_URL).strip().rstrip('/')
-    target_url = urljoin(f"{base_url}/", OPENAI_COMPATIBLE_PATH.lstrip('/'))
-
+-    base_url = (request_data.api_address or DEFAULT_OPENAI_API_BASE_URL).strip().rstrip('/')
+-    target_url = urljoin(f"{base_url}/", OPENAI_COMPATIBLE_PATH.lstrip('/'))
++    # 根据用户规则构建目标 URL：
++    # 1) 以 # 结尾：上层 openai.py 会直接用用户地址（去掉 #），此处返回一个合理的默认值占位
++    # 2) 地址包含路径且不以 / 结尾：视为完整端点，原样使用
++    # 3) 地址以 / 结尾：不要 v1，改为补 /chat/completions
++    # 4) 地址既无路径也无 #：自动补 /v1/chat/completions
++    api_addr = (request_data.api_address or "").strip()
++    default_path = OPENAI_COMPATIBLE_PATH.lstrip('/')  # e.g. v1/chat/completions
++    no_v1_path = default_path[len('v1/'):] if default_path.startswith('v1/') else 'chat/completions'
++
++    if not api_addr:
++        base_url = DEFAULT_OPENAI_API_BASE_URL.strip().rstrip('/')
++        target_url = urljoin(f"{base_url}/", default_path)
++    else:
++        if api_addr.endswith('#'):
++            # 占位：最终 URL 将在 openai.py 中用去掉 # 的地址覆盖
++            base_url = DEFAULT_OPENAI_API_BASE_URL.strip().rstrip('/')
++            target_url = urljoin(f"{base_url}/", default_path)
++        else:
++            # 使用 urlparse 判断是否包含路径（为避免无 schema 的误判，仅用于判定）
++            parse_for_det = api_addr if '://' in api_addr else f"http://{api_addr}"
++            parsed = urlparse(parse_for_det)
++            path = parsed.path or ""
++            if path == "":
++                # 无路径 -> 自动补 /v1/chat/completions
++                target_url = f"{api_addr.rstrip('/')}/{default_path}"
++            elif path.endswith('/'):
++                # 以 / 结尾 -> 不要 v1，补 /chat/completions
++                target_url = f"{api_addr.rstrip('/')}/{no_v1_path}"
++            else:
++                # 已包含路径且不以 / 结尾 -> 视为完整端点
++                target_url = api_addr
     headers = {
         "Authorization": f"Bearer {request_data.api_key}",
         "Content-Type": "application/json",

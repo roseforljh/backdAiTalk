@@ -470,64 +470,77 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
                 final_api_url = chat_input.api_address[:-1]
                 logger.info(f"{log_prefix}: Overriding API URL to: {final_api_url}")
 
-            async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
-                upstream_ok = response.status_code == 200
-                response.raise_for_status()
-                
-                buffer = bytearray()
-                try:
-                    done = False
-                    async for chunk in response.aiter_bytes():
-                        if done:
-                            break
-                        buffer.extend(chunk)
-                        while not done:
-                            separator_pos = buffer.find(b'\n\n')
-                            if separator_pos == -1:
-                                break
-
-                            message_data = buffer[:separator_pos]
-                            buffer = buffer[separator_pos + 2:]
-
-                            if not message_data.strip():
-                                continue
-
-                            for line in message_data.split(b'\n'):
-                                line = line.strip()
-                                if line.startswith(b"data:"):
-                                    json_str = line[5:].strip()
-                                    if json_str == b"[DONE]":
-                                        done = True
+            try:
+                async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
+                    upstream_ok = response.status_code == 200
+                    try:
+                        response.raise_for_status()
+                    except Exception as e_http:
+                        is_upstream_ok = False
+                        is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
+                        async for error_event in handle_stream_error(e_http, request_id, is_upstream_ok, is_first_chunk_received):
+                            yield error_event
+                    else:
+                        buffer = bytearray()
+                        try:
+                            done = False
+                            async for chunk in response.aiter_bytes():
+                                if done:
+                                    break
+                                buffer.extend(chunk)
+                                while not done:
+                                    separator_pos = buffer.find(b'\n\n')
+                                    if separator_pos == -1:
                                         break
-                                    try:
-                                        sse_data = orjson.loads(json_str.decode('utf-8'))
-                                        # The problematic markdown cleaning logic for non-Gemini models has been removed
-                                        # to prevent corruption of formatted text like code or LaTeX.
-                                        
-                                        if "gemini-2.5-flash-image-preview" in chat_input.model.lower():
-                                            try:
-                                                content = sse_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                                if content:
-                                                    image_data = orjson.loads(content)
-                                                    image_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
-                                                    if "url" in image_data or "b64_json" in image_data:
-                                                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="image_generation", image_url=image_url).model_dump(by_alias=True, exclude_none=True))
-                                                        sse_data["choices"][0]["delta"]["content"] = "" # Clear content to avoid text rendering
-                                            except (orjson.JSONDecodeError, IndexError):
-                                                pass # Not an image JSON, process as text
 
-                                        async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id, chat_input):
-                                            yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
-                                    except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
-                                        logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
-                except httpx.StreamClosed:
-                    logger.warning(f"{log_prefix}: The stream was closed by the server, possibly due to completion or timeout.")
-                except Exception as e:
-                    logger.error(f"{log_prefix}: An unexpected error occurred during the OpenAI-like stream: {e}", exc_info=True)
-                    is_upstream_ok = 'upstream_ok' in locals() and upstream_ok
-                    is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
-                    async for error_event in handle_stream_error(e, request_id, is_upstream_ok, is_first_chunk_received):
-                        yield error_event
+                                    message_data = buffer[:separator_pos]
+                                    buffer = buffer[separator_pos + 2:]
+
+                                    if not message_data.strip():
+                                        continue
+
+                                    for line in message_data.split(b'\n'):
+                                        line = line.strip()
+                                        if line.startswith(b"data:"):
+                                            json_str = line[5:].strip()
+                                            if json_str == b"[DONE]":
+                                                done = True
+                                                break
+                                            try:
+                                                sse_data = orjson.loads(json_str.decode('utf-8'))
+                                                # The problematic markdown cleaning logic for non-Gemini models has been removed
+                                                # to prevent corruption of formatted text like code or LaTeX.
+                                                
+                                                if "gemini-2.5-flash-image-preview" in chat_input.model.lower():
+                                                    try:
+                                                        content = sse_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                                        if content:
+                                                            image_data = orjson.loads(content)
+                                                            image_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
+                                                            if "url" in image_data or "b64_json" in image_data:
+                                                                yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="image_generation", image_url=image_url).model_dump(by_alias=True, exclude_none=True))
+                                                                sse_data["choices"][0]["delta"]["content"] = "" # Clear content to avoid text rendering
+                                                    except (orjson.JSONDecodeError, IndexError):
+                                                        pass # Not an image JSON, process as text
+
+                                                async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id, chat_input):
+                                                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
+                                            except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
+                                                logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
+                        except httpx.StreamClosed:
+                            logger.warning(f"{log_prefix}: The stream was closed by the server, possibly due to completion or timeout.")
+                        except Exception as e:
+                            logger.error(f"{log_prefix}: An unexpected error occurred during the OpenAI-like stream: {e}", exc_info=True)
+                            is_upstream_ok = 'upstream_ok' in locals() and upstream_ok
+                            is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
+                            async for error_event in handle_stream_error(e, request_id, is_upstream_ok, is_first_chunk_received):
+                                yield error_event
+            except (httpx.RequestError, httpx.HTTPStatusError, Exception) as e_outer:
+                is_upstream_ok = False
+                is_first_chunk_received = False
+                logger.error(f"{log_prefix}: Failed to establish upstream stream or HTTP error before reading: {e_outer}", exc_info=True)
+                async for error_event in handle_stream_error(e_outer, request_id, is_upstream_ok, is_first_chunk_received):
+                    yield error_event
         finally:
             is_upstream_ok_final = 'upstream_ok' in locals() and upstream_ok
             use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=False)
