@@ -77,7 +77,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true
 
       # == 打 v* 标签：发布多架构 ==
       - name: Build & Push (release tags, multi-arch)
@@ -94,7 +93,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
-          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true
 
       # 输出镜像摘要 & 常用拉取命令到 Job Summary
       - name: Write summary
@@ -119,12 +117,12 @@ jobs:
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # 生成 SBOM（spdx.json），方便合规与排查
+      # 生成 SBOM（spdx.json），用 digest 精确定位镜像
       - name: Generate SBOM (Syft)
         if: github.event_name != 'pull_request'
         uses: anchore/sbom-action@v0.17.9
         with:
-          image: ${{ env.IMAGE_NAME }}:$(echo "${{ steps.meta.outputs.tags }}" | head -n1 | sed 's/^.*://')
+          image: ${{ env.IMAGE_NAME }}@${{ steps.build_release.outputs.digest || steps.build_branch.outputs.digest }}
           artifact-name: sbom-${{ github.run_id }}.spdx.json
 
   # 漏洞扫描（推送后执行）
