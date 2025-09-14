@@ -124,70 +124,10 @@ def prepare_openai_request(
     request_id: str,
    system_prompt: Optional[str] = None
 ) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
-    # 根据用户规则构建目标 URL：
-    # 1) 以 # 结尾：上层 openai.py 会直接用用户地址（去掉 #），此处返回一个合理的默认值占位
-    # 2) 地址包含路径且不以 / 结尾：视为完整端点，原样使用
-    # 3) 地址以 / 结尾：不要 v1，改为补 /{...}（completions 或 responses）
-    # 4) 地址既无路径也无 #：自动补 /v1/{...}（completions 或 responses）
-    api_addr = (request_data.api_address or "").strip()
+    # URL构建逻辑已移至 `openai.py`，此处仅返回一个占位符。
+    # 实际请求URL将由调用方根据 `request_data.api_address` 决定。
+    target_url = request_data.api_address or DEFAULT_OPENAI_API_BASE_URL
 
-    # 默认 completions 路径
-    default_path = OPENAI_COMPATIBLE_PATH.lstrip('/')  # e.g. v1/chat/completions
-    no_v1_path = default_path[len('v1/'):] if default_path.startswith('v1/') else 'chat/completions'
-
-    # 针对“Gemini + 聚合商”的兼容：优先使用 /v1/responses（多数聚合商的 OpenAI 兼容实现）
-    RESPONSES_PATH = "/v1/responses"
-    responses_default_path = RESPONSES_PATH.lstrip('/')    # v1/responses
-    responses_no_v1_path = "responses"
-
-    def _is_google_official(addr: str) -> bool:
-        if not addr:
-            return False
-        try:
-            parsed = urlparse(addr if '://' in addr else f"http://{addr}")
-            host = (parsed.netloc or "").lower()
-            return any(
-                host == d or host.endswith("." + d)
-                for d in ("generativelanguage.googleapis.com", "aiplatform.googleapis.com", "googleapis.com", "ai.google.dev")
-            )
-        except Exception:
-            return False
-
-    prefer_responses = is_gemini_model_in_openai_format(request_data.model) and not _is_google_official(api_addr)
-
-    path_for_this = responses_default_path if prefer_responses else default_path
-    no_v1_for_this = responses_no_v1_path if prefer_responses else no_v1_path
-
-    if not api_addr:
-        base_url = DEFAULT_OPENAI_API_BASE_URL.strip().rstrip('/')
-        target_url = urljoin(f"{base_url}/", path_for_this)
-        if prefer_responses:
-            logger.info(f"RID-{request_id}: Using /v1/responses for Gemini aggregator endpoint (no apiAddress provided)")
-    else:
-        if api_addr.endswith('#'):
-            # 占位：最终 URL 将在 openai.py 中用去掉 # 的地址覆盖
-            base_url = DEFAULT_OPENAI_API_BASE_URL.strip().rstrip('/')
-            target_url = urljoin(f"{base_url}/", path_for_this)
-            if prefer_responses:
-                logger.info(f"RID-{request_id}: Using /v1/responses placeholder for Gemini aggregator (apiAddress endswith #)")
-        else:
-            # 使用 urlparse 判断是否包含路径（为避免无 schema 的误判，仅用于判定）
-            parse_for_det = api_addr if '://' in api_addr else f"http://{api_addr}"
-            parsed = urlparse(parse_for_det)
-            path = parsed.path or ""
-            if path == "":
-                # 无路径 -> 自动补 /v1/{...}
-                target_url = f"{api_addr.rstrip('/')}/{path_for_this}"
-                if prefer_responses:
-                    logger.info(f"RID-{request_id}: Using /v1/responses for Gemini aggregator (base without path)")
-            elif path.endswith('/'):
-                # 以 / 结尾 -> 不要 v1，补 {...}
-                target_url = f"{api_addr.rstrip('/')}/{no_v1_for_this}"
-                if prefer_responses:
-                    logger.info(f"RID-{request_id}: Using /responses for Gemini aggregator (base ends with /)")
-            else:
-                # 已包含路径且不以 / 结尾 -> 视为完整端点（尊重用户/聚合商指定）
-                target_url = api_addr
     # 更高兼容性的鉴权头：除 Bearer 外，补充 x-api-key；若为 Gemini 系列模型，再补充 x-goog-api-key
     headers = {
         "Authorization": f"Bearer {request_data.api_key}",
