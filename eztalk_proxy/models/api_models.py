@@ -89,6 +89,8 @@ class ChatRequestModel(BaseModel):
     api_address: Optional[str] = Field(None, alias="apiAddress")
     messages: List[AbstractApiMessagePy]
     provider: str
+    # 新增：前端显式传递的“渠道”，用于优先分发（例如：Gemini 官方 / OpenAI 兼容）
+    channel: Optional[str] = Field(None, alias="channel")
     model: str
     api_key: str = Field(alias="apiKey")
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)

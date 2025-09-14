@@ -11,6 +11,7 @@ class ImageGenerationRequest(BaseModel):
     guidance_scale: Optional[float] = Field(7.5, description="Higher guidance scale encourages to generate images that are closely linked to the text prompt.")
     apiAddress: str = Field(..., description="The address of the downstream API service.")
     apiKey: str = Field(..., description="The API key for the downstream service.")
+    provider: Optional[str] = Field("openai compatible", description="The provider/channel type: 'gemini', 'openai compatible', etc.")
 
 class ImageUrl(BaseModel):
     url: str

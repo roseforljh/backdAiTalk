@@ -470,77 +470,136 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
                 final_api_url = chat_input.api_address[:-1]
                 logger.info(f"{log_prefix}: Overriding API URL to: {final_api_url}")
 
-            try:
-                async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
-                    upstream_ok = response.status_code == 200
-                    try:
-                        response.raise_for_status()
-                    except Exception as e_http:
-                        is_upstream_ok = False
-                        is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
-                        async for error_event in handle_stream_error(e_http, request_id, is_upstream_ok, is_first_chunk_received):
-                            yield error_event
-                    else:
-                        buffer = bytearray()
+            def _compute_fallback_url(url: str) -> str | None:
+                try:
+                    if "/responses" in url:
+                        return url.replace("/v1/responses", "/v1/chat/completions").replace("/responses", "/chat/completions")
+                    if "/chat/completions" in url:
+                        return url.replace("/v1/chat/completions", "/v1/responses").replace("/chat/completions", "/responses")
+                    return None
+                except Exception:
+                    return None
+
+            urls_to_try = [final_api_url]
+            # 如果是聚合商（常见为 /v1/responses），失败时尝试互相回退
+            fallback_candidate = _compute_fallback_url(final_api_url)
+
+            # 进一步增强：为聚合商准备一组常见兼容端点候选（顺序尝试）
+            if is_gemini_request and not is_official_google_api:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(final_api_url if "://" in final_api_url else f"http://{final_api_url}")
+                    base = f"{parsed.scheme}://{parsed.netloc}"
+                    alt_paths = [
+                        "/v1/responses",
+                        "/v1/chat/completions",
+                        "/v1/completions",
+                        "/responses",
+                        "/chat/completions",
+                        "/completions",
+                    ]
+                    # 以当前 URL 为首，后续追加不同路径的候选
+                    for p in alt_paths:
+                        alt_url = base + p
+                        if alt_url not in urls_to_try:
+                            urls_to_try.append(alt_url)
+                    logger.info(f"{log_prefix}: Aggregator mode candidates: {urls_to_try}")
+                except Exception as _e:
+                    logger.debug(f"{log_prefix}: Failed to build aggregator candidates: {_e}")
+
+            tried_urls = set()
+
+            while urls_to_try:
+                current_url = urls_to_try.pop(0)
+                if current_url in tried_urls:
+                    continue
+                tried_urls.add(current_url)
+
+                try:
+                    async with http_client.stream("POST", current_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
+                        upstream_ok = response.status_code == 200
                         try:
-                            done = False
-                            async for chunk in response.aiter_bytes():
-                                if done:
-                                    break
-                                buffer.extend(chunk)
-                                while not done:
-                                    separator_pos = buffer.find(b'\n\n')
-                                    if separator_pos == -1:
-                                        break
-
-                                    message_data = buffer[:separator_pos]
-                                    buffer = buffer[separator_pos + 2:]
-
-                                    if not message_data.strip():
-                                        continue
-
-                                    for line in message_data.split(b'\n'):
-                                        line = line.strip()
-                                        if line.startswith(b"data:"):
-                                            json_str = line[5:].strip()
-                                            if json_str == b"[DONE]":
-                                                done = True
-                                                break
-                                            try:
-                                                sse_data = orjson.loads(json_str.decode('utf-8'))
-                                                # The problematic markdown cleaning logic for non-Gemini models has been removed
-                                                # to prevent corruption of formatted text like code or LaTeX.
-                                                
-                                                if "gemini-2.5-flash-image-preview" in chat_input.model.lower():
-                                                    try:
-                                                        content = sse_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                                        if content:
-                                                            image_data = orjson.loads(content)
-                                                            image_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
-                                                            if "url" in image_data or "b64_json" in image_data:
-                                                                yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="image_generation", image_url=image_url).model_dump(by_alias=True, exclude_none=True))
-                                                                sse_data["choices"][0]["delta"]["content"] = "" # Clear content to avoid text rendering
-                                                    except (orjson.JSONDecodeError, IndexError):
-                                                        pass # Not an image JSON, process as text
-
-                                                async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id, chat_input):
-                                                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
-                                            except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
-                                                logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
-                        except httpx.StreamClosed:
-                            logger.warning(f"{log_prefix}: The stream was closed by the server, possibly due to completion or timeout.")
-                        except Exception as e:
-                            logger.error(f"{log_prefix}: An unexpected error occurred during the OpenAI-like stream: {e}", exc_info=True)
-                            is_upstream_ok = 'upstream_ok' in locals() and upstream_ok
+                            response.raise_for_status()
+                        except httpx.HTTPStatusError as e_http:
+                            status = getattr(e_http.response, "status_code", None)
+                            # 仅在 404/405 时尝试路径互换回退（/responses ↔ /chat/completions）
+                            if status in (404, 405) and fallback_candidate and fallback_candidate not in tried_urls:
+                                logger.info(f"{log_prefix}: Upstream {status} at {current_url}. Falling back to: {fallback_candidate}")
+                                urls_to_try.append(fallback_candidate)
+                                # 下一轮循环尝试 fallback
+                                continue
+                            # 其他错误：按原逻辑回传错误事件
+                            is_upstream_ok = False
                             is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
-                            async for error_event in handle_stream_error(e, request_id, is_upstream_ok, is_first_chunk_received):
+                            async for error_event in handle_stream_error(e_http, request_id, is_upstream_ok, is_first_chunk_received):
                                 yield error_event
-            except (httpx.RequestError, httpx.HTTPStatusError, Exception) as e_outer:
-                is_upstream_ok = False
-                is_first_chunk_received = False
-                logger.error(f"{log_prefix}: Failed to establish upstream stream or HTTP error before reading: {e_outer}", exc_info=True)
-                async for error_event in handle_stream_error(e_outer, request_id, is_upstream_ok, is_first_chunk_received):
-                    yield error_event
+                        else:
+                            buffer = bytearray()
+                            try:
+                                done = False
+                                async for chunk in response.aiter_bytes():
+                                    if done:
+                                        break
+                                    buffer.extend(chunk)
+                                    while not done:
+                                        separator_pos = buffer.find(b'\n\n')
+                                        if separator_pos == -1:
+                                            break
+
+                                        message_data = buffer[:separator_pos]
+                                        buffer = buffer[separator_pos + 2:]
+
+                                        if not message_data.strip():
+                                            continue
+
+                                        for line in message_data.split(b'\n'):
+                                            line = line.strip()
+                                            if line.startswith(b"data:"):
+                                                json_str = line[5:].strip()
+                                                if json_str == b"[DONE]":
+                                                    done = True
+                                                    break
+                                                try:
+                                                    sse_data = orjson.loads(json_str.decode('utf-8'))
+                                                    # The problematic markdown cleaning logic for non-Gemini models has been removed
+                                                    # to prevent corruption of formatted text like code or LaTeX.
+
+                                                    if "gemini-2.5-flash-image-preview" in chat_input.model.lower():
+                                                        try:
+                                                            content = sse_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                                            if content:
+                                                                image_data = orjson.loads(content)
+                                                                image_url = image_data.get("url") or f"data:image/png;base64,{image_data.get('b64_json')}"
+                                                                if "url" in image_data or "b64_json" in image_data:
+                                                                    yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="image_generation", image_url=image_url).model_dump(by_alias=True, exclude_none=True))
+                                                                    sse_data["choices"][0]["delta"]["content"] = "" # Clear content to avoid text rendering
+                                                        except (orjson.JSONDecodeError, IndexError):
+                                                            pass # Not an image JSON, process as text
+
+                                                    async for event in process_openai_like_sse_stream(sse_data, processing_state, request_id, chat_input):
+                                                        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(**event).model_dump(by_alias=True, exclude_none=True))
+                                                except (orjson.JSONDecodeError, UnicodeDecodeError) as e:
+                                                    logger.warning(f"{log_prefix}: Skipping corrupted SSE line: {e}. Line: {line[:100]}...")
+                            except httpx.StreamClosed:
+                                logger.warning(f"{log_prefix}: The stream was closed by the server, possibly due to completion or timeout.")
+                            except Exception as e:
+                                logger.error(f"{log_prefix}: An unexpected error occurred during the OpenAI-like stream: {e}", exc_info=True)
+                                is_upstream_ok = 'upstream_ok' in locals() and upstream_ok
+                                is_first_chunk_received = 'first_chunk_received' in locals() and first_chunk_received
+                                async for error_event in handle_stream_error(e, request_id, is_upstream_ok, is_first_chunk_received):
+                                    yield error_event
+                        # 本次 URL 已成功完成（无 raise_for_status），跳出重试循环
+                        break
+                except (httpx.RequestError, httpx.HTTPStatusError, Exception) as e_outer:
+                    is_upstream_ok = False
+                    is_first_chunk_received = False
+                    logger.error(f"{log_prefix}: Failed to establish upstream stream or HTTP error before reading: {e_outer}", exc_info=True)
+                    # 如果还有候选 URL（例如 fallback），继续；否则回传错误
+                    if urls_to_try:
+                        continue
+                    async for error_event in handle_stream_error(e_outer, request_id, is_upstream_ok, is_first_chunk_received):
+                        yield error_event
+                    break
         finally:
             is_upstream_ok_final = 'upstream_ok' in locals() and upstream_ok
             use_custom_sep = should_apply_custom_separator_logic(chat_input, request_id, is_google_like_path=False, is_native_thinking_active=False)

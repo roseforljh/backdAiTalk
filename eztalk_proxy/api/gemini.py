@@ -100,6 +100,26 @@ def is_google_official_api(api_address: str) -> bool:
     api_address_lower = api_address.lower()
     return any(domain in api_address_lower for domain in google_domains)
 
+
+def mask_api_key(api_key: str) -> str:
+    """Return a masked/fingerprinted representation of an API key for safe logging."""
+    if not api_key:
+        return "(empty)"
+    head = api_key[:4]
+    tail = api_key[-4:] if len(api_key) > 8 else "****"
+    return f"{head}...{tail} (len={len(api_key)})"
+
+
+def looks_like_google_api_key(api_key: str) -> bool:
+    """
+    Heuristic check for Google AI Studio API Key format.
+    Most Google API keys start with 'AIza' when used with ?key= for REST endpoints.
+    This is a heuristic; passing this check does not guarantee validity.
+    """
+    if not api_key:
+        return False
+    return api_key.startswith("AIza") and len(api_key) >= 20
+
 async def sse_event_serializer_rest(event_data: AppStreamEventPy) -> bytes:
     return orjson_dumps_bytes_wrapper(event_data.model_dump(by_alias=True, exclude_none=True))
 
@@ -122,26 +142,33 @@ async def handle_gemini_request(
             yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="no_api_key", timestamp=get_current_time_iso()))
         return StreamingResponse(error_gen(), media_type="text/event-stream")
     
-    # Check if this is a Google official API address
+    # 先判断地址是否 Google 官方，再决定是否做 Key 形态校验与调用路径
     api_address = gemini_chat_input.api_address or ""
     is_google_official = is_google_official_api(api_address)
-    
+
+    # 日志打印 Key 指纹（安全掩码）
+    masked = mask_api_key(gemini_chat_input.api_key)
+    logger.info(f"{log_prefix}: Gemini API key fingerprint: {masked}; is_google_official={is_google_official}; base='{api_address or '(google default)'}'")
+
+    # 仅在直连 Google 官方时，才执行 AIza 形态启发式校验
+    if is_google_official and not looks_like_google_api_key(gemini_chat_input.api_key):
+        logger.error(f"{log_prefix}: Provided key does not look like Google AI Studio key. key={masked}, provider='{gemini_chat_input.provider}'")
+        async def error_gen():
+            yield await sse_event_serializer_rest(AppStreamEventPy(
+                type="error",
+                message="提供的 API 密钥看起来不像 Google 官方密钥（通常以 AIza 开头）。请在设置中选择 Gemini 官方通道并填入 Google AI Studio 的 API Key，或在渠道中选择 OpenAI 兼容聚合商。",
+                timestamp=get_current_time_iso()
+            ))
+            yield await sse_event_serializer_rest(AppStreamEventPy(type="finish", reason="invalid_api_key_format", timestamp=get_current_time_iso()))
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
+
+    # 直连 Google 官方 → 使用 SDK 配置（用于 File API 等能力），同时 REST 仍走官方流式端点
     if is_google_official:
-        # Use Gemini native format for Google official API
         genai.configure(api_key=gemini_chat_input.api_key)
-        logger.info(f"{log_prefix}: Using Gemini native format for Google official API")
+        logger.info(f"{log_prefix}: Using Gemini native REST via Google official endpoint")
     else:
-        # Use OpenAI compatible format for non-Google APIs
-        logger.info(f"{log_prefix}: Using OpenAI compatible format for non-Google API: {api_address}")
-        # Redirect to OpenAI compatible handler
-        from . import openai
-        return await openai.handle_openai_compatible_request(
-            chat_input=gemini_chat_input,
-            uploaded_documents=uploaded_files,
-            fastapi_request_obj=fastapi_request_obj,
-            http_client=http_client,
-            request_id=request_id,
-        )
+        # 非 Google 域名但仍为“AI Studio Build 的二次代理/2api”，按“Gemini REST 语义”使用自定义 base 直连，不再回退到 OpenAI 兼容
+        logger.info(f"{log_prefix}: Using Gemini native REST via custom base (AI Studio proxy/2api): {api_address}")
 
     # Process uploaded files
     if uploaded_files:

@@ -14,6 +14,13 @@ from . import gemini, openai
 logger = logging.getLogger("EzTalkProxy.Routers.Chat")
 router = APIRouter()
 
+def mask_api_key_for_log(api_key: Optional[str]) -> str:
+    if not api_key:
+        return "(empty)"
+    head = api_key[:4]
+    tail = api_key[-4:] if len(api_key) > 8 else "****"
+    return f"{head}...{tail} (len={len(api_key)})"
+
 def is_google_official_api(api_address: str) -> bool:
     """
     判断API地址是否为Google官方地址
@@ -96,6 +103,33 @@ async def extract_chat_request_from_form(request: Request) -> tuple[str, List[Up
         logger.error(f"Error extracting chat request from form: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Failed to parse multipart form data: {e}")
 
+def decide_chat_channel(chat_input: ChatRequestModel) -> tuple[str, str]:
+    """
+    决策文本聊天所用渠道：
+    - 优先依据 provider 关键词
+    - 次选依据 model 是否包含 'gemini'
+    - 最后依据 apiAddress 是否为 Google 官方域名
+    返回 (channel, reason)，channel ∈ {'gemini','openai'}
+    reason ∈ {'provider','model','domain','fallback'}
+    """
+    provider_lower = (chat_input.provider or "").lower()
+    gemini_keys = ["gemini", "google", "vertex", "aistudio", "google-gemini"]
+    openai_keys = ["openai", "azure", "oai", "gpt", "openai-compatible", "openai_compatible"]
+
+    if any(k in provider_lower for k in gemini_keys):
+        return "gemini", "provider"
+    if any(k in provider_lower for k in openai_keys):
+        return "openai", "provider"
+
+    model_lower = (chat_input.model or "").lower()
+    if "gemini" in model_lower:
+        return "gemini", "model"
+
+    if is_google_official_api(chat_input.api_address or ""):
+        return "gemini", "domain"
+
+    return "openai", "fallback"
+
 @router.post("/chat", response_class=StreamingResponse, summary="AI聊天完成代理", tags=["AI Proxy"])
 async def chat_proxy_entrypoint(
     fastapi_request_obj: Request,
@@ -117,16 +151,22 @@ async def chat_proxy_entrypoint(
         chat_input_data = orjson.loads(chat_request_json_str)
         chat_input = ChatRequestModel(**chat_input_data)
         logger.info(f"{log_prefix}: Parsed ChatRequestModel for provider '{chat_input.provider}' and model '{chat_input.model}'.")
+        try:
+            masked = mask_api_key_for_log(getattr(chat_input, "api_key", None))
+            logger.info(f"{log_prefix}: API key fingerprint: {masked}; apiAddress='{chat_input.api_address}'")
+        except Exception as _e:
+            logger.debug(f"{log_prefix}: Failed to log api key fingerprint safely: {_e}")
     except (orjson.JSONDecodeError, TypeError, ValueError) as e:
         logger.error(f"{log_prefix}: Failed to parse or validate chat request JSON: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Invalid chat request data: {e}")
 
-    # 新的路由逻辑：根据API地址判断是否使用Gemini规则
-    # 如果地址为Google官方，则走Gemini规则；否则全部走OpenAI兼容格式规则
-    use_gemini_format = is_google_official_api(chat_input.api_address)
-    
-    if use_gemini_format:
-        logger.info(f"{log_prefix}: API address '{chat_input.api_address}' is Google official, dispatching to Gemini handler for model {chat_input.model}.")
+    # 使用新版分发：channel 优先（实现“文本模式 Gemini 可走聚合商链路”）
+    channel, reason = decide_chat_channel_v2(chat_input)
+    logger.info(f"{log_prefix}: Channel decided (v2) => {channel} (reason={reason}); "
+                f"provider='{chat_input.provider}', model='{chat_input.model}', api='{chat_input.api_address}', channel_field='{getattr(chat_input, 'channel', None)}'.")
+
+    if channel == "gemini":
+        # 仅当确认为 Gemini 官方直连时才进入 gemini 处理器；不再强制覆盖为官方地址
         return await gemini.handle_gemini_request(
             gemini_chat_input=chat_input,
             uploaded_files=uploaded_documents,
@@ -135,7 +175,7 @@ async def chat_proxy_entrypoint(
             request_id=request_id,
         )
     else:
-        logger.info(f"{log_prefix}: API address '{chat_input.api_address}' is not Google official, dispatching to OpenAI compatible handler for model {chat_input.model}.")
+        # 其余（包括 Gemini + 聚合商）统一走 OpenAI 兼容分支（与图像模式行为保持一致）
         return await openai.handle_openai_compatible_request(
             chat_input=chat_input,
             uploaded_documents=uploaded_documents,
@@ -143,3 +183,58 @@ async def chat_proxy_entrypoint(
             http_client=http_client,
             request_id=request_id,
         )
+def decide_chat_channel_v2(chat_input: ChatRequestModel) -> tuple[str, str]:
+    """
+    文本模式分发（channel 优先）：
+    - 若 channel 明确为 OpenAI 兼容（含“openai”、“兼容”、“compatible”、“oai”、“azure”等），直接走 openai
+    - 若 channel 明确为 Gemini 官方（含“gemini”、“google”、“aistudio”、“ai studio”、“官方”等）：
+        * 若 apiAddress 是 Google 官方域名或未提供 → gemini
+        * 否则（地址看起来是聚合商）→ openai（避免把聚合商强制改成直连 Google）
+    - 如 channel 未明确：按 provider → model → 域名兜底
+    返回 (channel, reason)，channel ∈ {'gemini','openai'}
+    """
+    channel_lower = (getattr(chat_input, "channel", None) or "").lower()
+    provider_lower = (chat_input.provider or "").lower()
+    model_lower = (chat_input.model or "").lower()
+    api_addr = (chat_input.api_address or "")
+
+    # 1) channel 明确优先
+    if channel_lower:
+        # OpenAI 兼容通道关键词
+        openai_keys = ["openai", "兼容", "compatible", "oai", "azure"]
+        if any(k in channel_lower for k in openai_keys):
+            return "openai", "channel"
+
+        # Gemini 官方通道关键词（按你的要求：只要 channel 表示 Gemini，就视为 Gemini 语义，不再因地址而回退到 OpenAI 兼容）
+        gemini_channel_keys = ["gemini", "google", "aistudio", "ai studio", "官方"]
+        if any(k in channel_lower for k in gemini_channel_keys):
+            return "gemini", "channel"
+
+    # 2) provider 推断
+    # 常见聚合/代理关键词（尽量窄匹配，避免误杀）
+    provider_is_aggregator = any(
+        key in provider_lower
+        for key in ["asb", "abs", "openrouter", "router", "done", "hub"]
+    )
+    if provider_is_aggregator:
+        return "openai", "provider_agg"
+
+    gemini_provider_keys = ["gemini", "google", "vertex", "aistudio", "google-gemini"]
+    if any(k in provider_lower for k in gemini_provider_keys):
+        # 若地址非 Google 官方，仍视为聚合商 → openai
+        if api_addr and not is_google_official_api(api_addr):
+            return "openai", "provider_non_google_address"
+        return "gemini", "provider"
+
+    # 3) model 推断
+    if "gemini" in model_lower:
+        # 非 Google 官方域名 → 当作聚合商，走 openai 兼容
+        if api_addr and not is_google_official_api(api_addr):
+            return "openai", "model_non_google"
+        return "gemini", "model"
+
+    # 4) 域名兜底
+    if is_google_official_api(api_addr):
+        return "gemini", "domain"
+
+    return "openai", "fallback"

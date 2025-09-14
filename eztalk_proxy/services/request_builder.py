@@ -77,6 +77,10 @@ print("Hello")
 
 # 5. 标准 Markdown 细则
 - 标题：# 后空格；列表项符号后空格；链接：[text](url)；引用：> 后空格。
+- 列表强约束：
+  - 列表项起始仅允许使用 "-"、"*"、"+"、数字. 或 数字) 作为项目符号；其后必须紧跟一个空格。
+  - 禁止在中文段首使用单个星号作为“强调”开头（会造成歧义）。如需强调中文词语，请使用成对的双星号（例如：**重要**），而非行首单星号。
+  - 将全角符号（＊、﹡、•、·、・、﹒、∙）替换为半角列表符号，并补空格（例如：＊事项 -> * 事项；•要点 -> - 要点）。
 - 段落之间使用空行分隔；不要输出大段无意义空行。
 
 # 6. 流式/分片输出纪律
@@ -123,39 +127,77 @@ def prepare_openai_request(
     # 根据用户规则构建目标 URL：
     # 1) 以 # 结尾：上层 openai.py 会直接用用户地址（去掉 #），此处返回一个合理的默认值占位
     # 2) 地址包含路径且不以 / 结尾：视为完整端点，原样使用
-    # 3) 地址以 / 结尾：不要 v1，改为补 /chat/completions
-    # 4) 地址既无路径也无 #：自动补 /v1/chat/completions
+    # 3) 地址以 / 结尾：不要 v1，改为补 /{...}（completions 或 responses）
+    # 4) 地址既无路径也无 #：自动补 /v1/{...}（completions 或 responses）
     api_addr = (request_data.api_address or "").strip()
+
+    # 默认 completions 路径
     default_path = OPENAI_COMPATIBLE_PATH.lstrip('/')  # e.g. v1/chat/completions
     no_v1_path = default_path[len('v1/'):] if default_path.startswith('v1/') else 'chat/completions'
 
+    # 针对“Gemini + 聚合商”的兼容：优先使用 /v1/responses（多数聚合商的 OpenAI 兼容实现）
+    RESPONSES_PATH = "/v1/responses"
+    responses_default_path = RESPONSES_PATH.lstrip('/')    # v1/responses
+    responses_no_v1_path = "responses"
+
+    def _is_google_official(addr: str) -> bool:
+        if not addr:
+            return False
+        try:
+            parsed = urlparse(addr if '://' in addr else f"http://{addr}")
+            host = (parsed.netloc or "").lower()
+            return any(
+                host == d or host.endswith("." + d)
+                for d in ("generativelanguage.googleapis.com", "aiplatform.googleapis.com", "googleapis.com", "ai.google.dev")
+            )
+        except Exception:
+            return False
+
+    prefer_responses = is_gemini_model_in_openai_format(request_data.model) and not _is_google_official(api_addr)
+
+    path_for_this = responses_default_path if prefer_responses else default_path
+    no_v1_for_this = responses_no_v1_path if prefer_responses else no_v1_path
+
     if not api_addr:
         base_url = DEFAULT_OPENAI_API_BASE_URL.strip().rstrip('/')
-        target_url = urljoin(f"{base_url}/", default_path)
+        target_url = urljoin(f"{base_url}/", path_for_this)
+        if prefer_responses:
+            logger.info(f"RID-{request_id}: Using /v1/responses for Gemini aggregator endpoint (no apiAddress provided)")
     else:
         if api_addr.endswith('#'):
             # 占位：最终 URL 将在 openai.py 中用去掉 # 的地址覆盖
             base_url = DEFAULT_OPENAI_API_BASE_URL.strip().rstrip('/')
-            target_url = urljoin(f"{base_url}/", default_path)
+            target_url = urljoin(f"{base_url}/", path_for_this)
+            if prefer_responses:
+                logger.info(f"RID-{request_id}: Using /v1/responses placeholder for Gemini aggregator (apiAddress endswith #)")
         else:
             # 使用 urlparse 判断是否包含路径（为避免无 schema 的误判，仅用于判定）
             parse_for_det = api_addr if '://' in api_addr else f"http://{api_addr}"
             parsed = urlparse(parse_for_det)
             path = parsed.path or ""
             if path == "":
-                # 无路径 -> 自动补 /v1/chat/completions
-                target_url = f"{api_addr.rstrip('/')}/{default_path}"
+                # 无路径 -> 自动补 /v1/{...}
+                target_url = f"{api_addr.rstrip('/')}/{path_for_this}"
+                if prefer_responses:
+                    logger.info(f"RID-{request_id}: Using /v1/responses for Gemini aggregator (base without path)")
             elif path.endswith('/'):
-                # 以 / 结尾 -> 不要 v1，补 /chat/completions
-                target_url = f"{api_addr.rstrip('/')}/{no_v1_path}"
+                # 以 / 结尾 -> 不要 v1，补 {...}
+                target_url = f"{api_addr.rstrip('/')}/{no_v1_for_this}"
+                if prefer_responses:
+                    logger.info(f"RID-{request_id}: Using /responses for Gemini aggregator (base ends with /)")
             else:
-                # 已包含路径且不以 / 结尾 -> 视为完整端点
+                # 已包含路径且不以 / 结尾 -> 视为完整端点（尊重用户/聚合商指定）
                 target_url = api_addr
+    # 更高兼容性的鉴权头：除 Bearer 外，补充 x-api-key；若为 Gemini 系列模型，再补充 x-goog-api-key
     headers = {
         "Authorization": f"Bearer {request_data.api_key}",
         "Content-Type": "application/json",
-        "Accept": "text/event-stream"
+        "Accept": "text/event-stream",
+        "x-api-key": request_data.api_key
     }
+    # 对于以 OpenAI 兼容格式调用的 Gemini 模型，一些聚合商要求 x-goog-api-key
+    if is_gemini_model_in_openai_format(request_data.model):
+        headers["x-goog-api-key"] = request_data.api_key
 
     # 添加格式化系统prompt
     final_messages = add_system_prompt_if_needed(copy.deepcopy(processed_messages), request_id)
@@ -356,7 +398,11 @@ def prepare_gemini_rest_api_request(
     
     logger.info(f"{log_prefix}: Using user-provided API key for Gemini request to {base_api_url}")
 
-    headers = {"Content-Type": "application/json"}
+    # 为官方 REST 同时携带请求头（兼容部分环境对 header 的要求）
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": chat_input.api_key
+    }
     json_payload: Dict[str, Any] = {}
     
     messages_to_convert_or_use: List[PartsApiMessagePy] = []
