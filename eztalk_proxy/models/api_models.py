@@ -117,6 +117,8 @@ class AppStreamEventPy(BaseModel):
     stage: Optional[str] = None
     results: Optional[List[Dict[str, Any]]] = None
     text: Optional[str] = None
+    output_type: Optional[str] = None
+    block_type: Optional[str] = None
     toolCallsData: Optional[List[Dict[str, Any]]] = Field(None, alias="data")
     id: Optional[str] = None
     name: Optional[str] = None

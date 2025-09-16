@@ -505,7 +505,11 @@ class AIOutputFormatRepair:
         if self.config.enable_markdown_repair and self.config.markdown_fix_headers:
             # 修复标题格式：确保#后面有空格
             repaired = re.sub(r'^(#{1,6})([^#\s])', r'\1 \2', repaired, flags=re.MULTILINE)
-        
+            
+            # 修复标题和表格在同一行的问题 (例如: ### title | col1 | col2 |)
+            # 修复为: ### title\n| col1 | col2 |
+            repaired = re.sub(r'^(#{1,6}\s+.*?)\s*\|', r'\1\n|', repaired, flags=re.MULTILINE)
+
         # 修复列表格式 - 增强版
         if self.config.enable_markdown_repair and self.config.markdown_fix_lists:
             # 无序列表

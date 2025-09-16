@@ -13,13 +13,107 @@ from .format_repair import format_repair_service
 logger = logging.getLogger("EzTalkProxy.StreamProcessors")
 
 MIN_REASONING_FLUSH_CHUNK_SIZE = 1
-MIN_CONTENT_FLUSH_CHUNK_SIZE = 80  # 提高阈值，避免过于频繁的刷新
+MIN_CONTENT_FLUSH_CHUNK_SIZE = 1  # 🎯 紧急修复：降低到最小值，避免内容丢失
 
 # 简单判断当前是否处于未闭合的代码围栏中（``` 计数为奇数）
 def _inside_code_fence(text: str) -> bool:
     if not text:
         return False
     return text.count('```') % 2 == 1
+
+# Markdown 块完整性检测器
+class MarkdownBlockDetector:
+    """检测 Markdown 块的完整性，优化流式输出时机"""
+    
+    @staticmethod
+    def is_complete_code_block(text: str) -> bool:
+        """检测代码块是否完整"""
+        if not text.strip():
+            return False
+        lines = text.split('\n')
+        fence_count = 0
+        for line in lines:
+            if line.strip().startswith('```'):
+                fence_count += 1
+        return fence_count >= 2 and fence_count % 2 == 0
+    
+    @staticmethod
+    def is_complete_math_block(text: str) -> bool:
+        """检测数学块是否完整"""
+        if not text.strip():
+            return False
+        # 检测 $$ 围栏
+        double_dollar_count = text.count('$$')
+        if double_dollar_count >= 2 and double_dollar_count % 2 == 0:
+            return True
+        # 检测 \[ \] 围栏
+        if text.count('\\[') > 0 and text.count('\\]') > 0:
+            return text.count('\\[') == text.count('\\]')
+        return False
+    
+    @staticmethod
+    def is_complete_table_block(text: str) -> bool:
+        """检测表格是否完整"""
+        if not text.strip():
+            return False
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        if len(lines) < 2:
+            return False
+        # 检查是否有表格分隔行
+        has_separator = any('---' in line and '|' in line for line in lines)
+        # 检查是否所有行都包含 |
+        all_have_pipes = all('|' in line for line in lines)
+        return has_separator and all_have_pipes
+    
+    @staticmethod
+    def is_complete_list_item(text: str) -> bool:
+        """检测列表项是否完整"""
+        if not text.strip():
+            return False
+        # 简单检测：以列表标记开始且包含完整内容
+        stripped = text.strip()
+        list_markers = ['* ', '- ', '+ '] + [f'{i}. ' for i in range(1, 10)]
+        starts_with_marker = any(stripped.startswith(marker) for marker in list_markers)
+        # 如果以换行符结束或包含句号，认为是完整的
+        ends_properly = text.endswith('\n') or text.endswith('.') or text.endswith('。')
+        return starts_with_marker and (ends_properly or len(stripped) > 20)
+    
+    @staticmethod
+    def is_safe_flush_point(accumulated_content: str, new_chunk: str) -> bool:
+        """判断是否是安全的刷新点"""
+        # 🎯 紧急修复：简化逻辑，减少过度过滤
+        full_content = accumulated_content + new_chunk
+        
+        # 只检查最关键的情况：代码围栏内部不安全
+        if _inside_code_fence(full_content):
+            return False
+        
+        # 其他情况一律认为安全，确保内容不丢失
+        return True
+    
+    @staticmethod
+    def detect_block_type(text: str) -> str:
+        """检测块类型"""
+        if not text.strip():
+            return "text"
+        
+        text_lower = text.lower().strip()
+        
+        if text_lower.startswith('```'):
+            return "code_block"
+        elif '$$' in text or '\\[' in text:
+            return "math_block"
+        elif '|' in text and ('---' in text or text.count('|') > 2):
+            return "table"
+        elif text_lower.startswith(('* ', '- ', '+ ')) or any(text_lower.startswith(f'{i}. ') for i in range(1, 10)):
+            return "list"
+        elif text_lower.startswith('#'):
+            return "heading"
+        else:
+            return "text"
+
+# 初始化块检测器
+block_detector = MarkdownBlockDetector()
 
 def preprocess_ai_output_content(content: str, request_id: str) -> str:
     """
@@ -296,15 +390,17 @@ async def process_openai_like_sse_stream(
                     yield {"type": "reasoning_finish", "timestamp": get_current_time_iso()}
                     state["reasoning_finish_event_sent"] = True
                 
-                # 更保守的刷新条件：避免在代码块未闭合时刷新
+                # 增强的刷新条件：使用 Markdown 块完整性检测
                 accumulated_content = state["accumulated_content"]
-                inside_code = _inside_code_fence(accumulated_content)
-                has_newline = '\n' in accumulated_content
-                has_sentence_end = any(punct in accumulated_content for punct in ['.', '!', '?', '。', '！', '？'])
-                large_enough = len(accumulated_content) >= MIN_CONTENT_FLUSH_CHUNK_SIZE
-                force_large_flush = len(accumulated_content) >= 200
-
-                should_flush = force_large_flush or (not inside_code and (has_newline or has_sentence_end) and large_enough)
+                
+                # 🎯 紧急修复：简化刷新条件，确保所有内容都被发送
+                # 直接刷新任何非空内容，不进行复杂的完整性检查
+                should_flush = len(accumulated_content) > 0
+                
+                # 检测当前块类型
+                current_block_type = block_detector.detect_block_type(accumulated_content)
+                
+                logger.debug(f"{log_prefix}: FLUSH_DECISION: should_flush={should_flush}, block_type={current_block_type}, accumulated_len={len(accumulated_content)}")
 
                 if should_flush:
                     # 根据配置决定是否在流式阶段进行修复
@@ -313,11 +409,11 @@ async def process_openai_like_sse_stream(
                     else:
                         content_to_send = format_repair_service.repair_ai_output(accumulated_content, "general")
                     
-                    logger.info(f"{log_prefix}: CONTENT_FLUSH: Sending {'raw' if content_to_send is accumulated_content else 'repaired'} content ({len(content_to_send)} chars)")
+                    logger.info(f"{log_prefix}: CONTENT_FLUSH: Sending {'raw' if content_to_send is accumulated_content else 'repaired'} content ({len(content_to_send)} chars, block_type={current_block_type})")
                     logger.debug(f"{log_prefix}: Content preview: {repr(content_to_send[:200])}")
                     
-                    output_type = format_repair_service.detect_output_type(content_to_send)
-                    yield {"type": "content", "text": content_to_send, "output_type": output_type, "timestamp": get_current_time_iso()}
+                    output_type = current_block_type if current_block_type != "text" else format_repair_service.detect_output_type(content_to_send)
+                    yield {"type": "content", "text": content_to_send, "output_type": output_type, "block_type": current_block_type, "timestamp": get_current_time_iso()}
                     state["accumulated_content"] = ""
                     content_str = "" # 标记为已处理
             else:
@@ -339,11 +435,12 @@ async def process_openai_like_sse_stream(
                 final_content_to_send = format_repair_service.repair_ai_output(state["accumulated_content"], "general")
                 logger.info(f"{log_prefix}: FINAL_CONTENT_FLUSH: Sending final repaired content ({len(final_content_to_send)} chars)")
                 output_type = format_repair_service.detect_output_type(final_content_to_send)
-                yield {"type": "content", "text": final_content_to_send, "output_type": output_type, "timestamp": get_current_time_iso()}
+                # 🎯 修复：使用 content_final 类型发送最终内容块
+                yield {"type": "content_final", "text": final_content_to_send, "output_type": output_type, "timestamp": get_current_time_iso()}
                 state["accumulated_content"] = ""
                 state["final_content_sent"] = True  # 标记最终内容已发送
             elif state["accumulated_content"]:
-                logger.info(f"{log_prefix}: FINAL_CONTENT_SKIP: Final content already sent, skipping duplicate send")
+                logger.info(f"{log_prefix}: FINAL_CONTENT_SKIP: Content exists but final_content_sent=True, clearing to prevent cleanup duplication")
                 state["accumulated_content"] = ""  # 清空以避免cleanup时重复
 
             # If there was any reasoning, ensure the finish event is sent before the final block.
@@ -452,11 +549,22 @@ async def handle_stream_cleanup(
         logger.info(f"{log_prefix}: Cleanup: Sending reasoning_finish event.")
         yield orjson_dumps_bytes_wrapper(AppStreamEventPy(type="reasoning_finish", timestamp=get_current_time_iso()).model_dump(by_alias=True, exclude_none=True))
 
-    # 完全禁用cleanup时的内容发送，避免重复
+    # 🎯 修复：确保在清理阶段发送任何剩余的累积内容，防止内容丢失
     if accumulated_content:
-        logger.info(f"{log_prefix}: Cleanup: Found remaining content ({len(accumulated_content)} chars) - SKIPPING to avoid duplication")
-        logger.info(f"{log_prefix}: Cleanup: Content preview: '{accumulated_content[:100]}...'")
-        logger.info(f"{log_prefix}: Cleanup: Content already sent during streaming, not sending again")
+        logger.info(f"{log_prefix}: Cleanup: Flushing remaining content ({len(accumulated_content)} chars)")
+        logger.debug(f"{log_prefix}: Cleanup: Content preview: '{accumulated_content[:100]}...'")
+        
+        final_content_to_send = format_repair_service.repair_ai_output(accumulated_content, "general")
+        output_type = format_repair_service.detect_output_type(final_content_to_send)
+
+        # 🎯 使用 'content_final' 类型发送最后的内容块，以便客户端知道这是流的结尾
+        yield orjson_dumps_bytes_wrapper(AppStreamEventPy(
+            type="content_final",
+            text=final_content_to_send,
+            output_type=output_type,
+            timestamp=get_current_time_iso()
+        ).model_dump(by_alias=True, exclude_none=True))
+        state["accumulated_content"] = ""
     else:
         logger.info(f"{log_prefix}: Cleanup: No remaining content to flush")
 
