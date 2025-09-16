@@ -293,22 +293,58 @@ class AIOutputFormatRepair:
 
     def _repair_math_format(self, text: str) -> str:
         """
-        简化数学公式修复 - 依赖前端KaTeX渲染
-        后端仅确保块级公式$$...$$前后有换行，以便Markdown正确解析
+        增强数学公式修复 - 自动包装数学表达式
         """
         if not self.config.enable_math_repair:
             return text
             
         try:
-            # 确保块级公式前后有换行
-            repaired = re.sub(r'([^\n])\$\$([^$]+)\$\$', r'\1\n$$\2$$', text)
+            repaired = text
+            
+            # 1. 确保块级公式前后有换行
+            repaired = re.sub(r'([^\n])\$\$([^$]+)\$\$', r'\1\n$$\2$$', repaired)
             repaired = re.sub(r'\$\$([^$]+)\$\$([^\n])', r'$$\1$$\n\2', repaired)
             
-            self.logger.debug("Simplified math format repair completed for KaTeX")
+            # 2. 自动包装数学表达式（如果启用 math_auto_wrap）
+            if self.config.math_auto_wrap:
+                # 检测常见的数学表达式模式并自动添加 $ 符号
+                
+                # 匹配类似 "E = mc^2" 的简单方程
+                simple_equation_pattern = r'\b([A-Za-z]+\s*=\s*[A-Za-z0-9\^{}\\+\-\*/\(\)\s]+)'
+                repaired = re.sub(simple_equation_pattern, r'$\1$', repaired)
+                
+                # 匹配省略号 \ldots, \cdots, \dots
+                dots_pattern = r'\\(ldots|cdots|dots)(?![a-zA-Z])'
+                repaired = re.sub(dots_pattern, r'$\\\1$', repaired)
+                
+                # 匹配指数表达式（如 x^2, a^{n+1}）
+                exponent_pattern = r'\b([a-zA-Z]+)\^(\{[^}]+\}|\w+)\b'
+                def fix_exponent(match):
+                    base = match.group(1)
+                    exponent = match.group(2)
+                    if exponent.startswith('{') and exponent.endswith('}'):
+                        return f'${base}^{exponent}$'
+                    else:
+                        return f'${base}^{{{exponent}}}$'
+                repaired = re.sub(exponent_pattern, fix_exponent, repaired)
+                
+                # 匹配分数表达式（如 \frac{a}{b}）
+                fraction_pattern = r'\\frac\{([^}]+)\}\{([^}]+)\}'
+                repaired = re.sub(fraction_pattern, r'$\\frac{\1}{\2}$', repaired)
+                
+                # 匹配积分表达式（如 \int_0^1 x^2 dx）
+                integral_pattern = r'\\int(_\{[^}]+\})?(\^\{[^}]+\})?\s*([^$\n]+)\s*d([a-zA-Z])'
+                repaired = re.sub(integral_pattern, r'$$\\int\1\2 \3 d\4$$', repaired)
+                
+                # 清理可能的双重包装
+                repaired = re.sub(r'\$\$([^$]+)\$\$', r'$$\1$$', repaired)  # 保持块级
+                repaired = re.sub(r'\$\$([^$\n]+)\$', r'$\1$', repaired)    # 转换为行内
+                
+            self.logger.debug("Enhanced math format repair completed with auto-wrapping")
             return repaired
             
         except Exception as e:
-            self.logger.error(f"Error in simplified math repair: {e}")
+            self.logger.error(f"Error in enhanced math repair: {e}")
             return text
     
     def _repair_code_format(self, text: str) -> str:
