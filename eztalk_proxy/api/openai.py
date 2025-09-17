@@ -114,8 +114,9 @@ def resize_and_encode_image_sync(image_bytes: bytes) -> str:
     This is a CPU-bound function and should be run in a thread.
     """
     if not Image:
-        # Pillow not installed, just encode without resizing
-        return base64.b64encode(image_bytes).decode('utf-8')
+        # Pillow not installed, just encode without resizing using Python's base64
+        import base64
+        return base64.b64encode(image_bytes).decode('utf-8').replace('\n', '')
 
     try:
         with Image.open(BytesIO(image_bytes)) as img:
@@ -128,11 +129,13 @@ def resize_and_encode_image_sync(image_bytes: bytes) -> str:
                 img.save(output_buffer, format=img_format)
                 image_bytes = output_buffer.getvalue()
 
-        return base64.b64encode(image_bytes).decode('utf-8')
+        import base64
+        return base64.b64encode(image_bytes).decode('utf-8').replace('\n', '')
     except Exception as e:
         logger.error(f"Failed to resize or encode image: {e}", exc_info=True)
         # Fallback to encoding the original bytes if processing fails
-        return base64.b64encode(image_bytes).decode('utf-8')
+        import base64
+        return base64.b64encode(image_bytes).decode('utf-8').replace('\n', '')
 
 
 async def handle_openai_compatible_request(
@@ -156,8 +159,30 @@ async def handle_openai_compatible_request(
         for doc_file in uploaded_documents:
             content_type = doc_file.content_type.lower() if doc_file.content_type else ""
             
-            # 处理所有多模态文件（音频/视频/图像），不再基于模型类型进行限制
-            if content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES:
+            # 🔥 修复：OpenAI兼容API不支持多种文档的多模态处理，需要走文本提取路径
+            document_types = [
+                "application/pdf",
+                "text/plain", 
+                "application/msword",  # .doc
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+                "application/vnd.ms-excel",  # .xls
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
+                "application/vnd.ms-powerpoint",  # .ppt
+                "text/html",
+                "text/xml",
+                "application/xml", 
+                "application/json",
+                "text/csv",
+                "text/markdown",
+                "text/rtf",
+                "application/rtf"
+            ]
+            is_document_type = content_type in document_types
+            should_use_multimodal = content_type in GEMINI_SUPPORTED_UPLOAD_MIMETYPES and not is_document_type
+            
+            # 处理音频/视频/图像等真正的多模态文件
+            if should_use_multimodal:
                 # 如果是Gemini模型但使用第三方API，给出警告
                 if is_gemini_request and not is_official_google_api and content_type in (AUDIO_MIME_TYPES + VIDEO_MIME_TYPES):
                     logger.warning(f"{log_prefix}: Using third-party API '{chat_input.api_address}' for Gemini model with audio/video content. This may not work properly.")
@@ -277,8 +302,8 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
                     if content_type in SUPPORTED_IMAGE_MIME_TYPES_FOR_OPENAI:
                         encoding_tasks.append(asyncio.to_thread(resize_and_encode_image_sync, part["data"]))
                     else:
-                        # 对于音频/视频文件，直接进行Base64编码
-                        encoding_tasks.append(asyncio.to_thread(base64.b64encode, part["data"]))
+                        # 对于音频/视频文件，直接进行Base64编码（确保无换行符）
+                        encoding_tasks.append(asyncio.to_thread(lambda data: base64.b64encode(data).decode('utf-8').replace('\n', ''), part["data"]))
 
                 if encoding_tasks:
                     try:
@@ -491,10 +516,35 @@ The video was uploaded but cannot be analyzed in OpenAI compatible mode due to s
 
             final_api_url = build_openai_compatible_url(chat_input.api_address)
             logger.info(f"{log_prefix}: Final target URL built for OpenAI compatible request: {final_api_url} (Original: {chat_input.api_address})")
+            
+            # 🔥 调试：记录请求payload的关键信息
+            try:
+                logger.info(f"{log_prefix}: Request payload keys: {list(current_api_payload.keys())}")
+                if "messages" in current_api_payload:
+                    messages = current_api_payload["messages"]
+                    logger.info(f"{log_prefix}: Messages count: {len(messages)}")
+                    for i, msg in enumerate(messages):
+                        if "content" in msg and isinstance(msg["content"], list):
+                            content_types = [part.get("type", "unknown") for part in msg["content"]]
+                            logger.info(f"{log_prefix}: Message {i} content types: {content_types}")
+                        elif "content" in msg:
+                            content_preview = str(msg["content"])[:100]
+                            logger.info(f"{log_prefix}: Message {i} content preview: {content_preview}")
+            except Exception as debug_error:
+                logger.error(f"{log_prefix}: Could not debug payload: {debug_error}")
 
             try:
                 async with http_client.stream("POST", final_api_url, headers=current_api_headers, json=current_api_payload, timeout=API_TIMEOUT) as response:
                     upstream_ok = response.status_code == 200
+                    
+                    # 🔥 调试：在抛出异常前获取错误详情
+                    if response.status_code != 200:
+                        try:
+                            error_body = await response.aread()
+                            logger.error(f"{log_prefix}: HTTP {response.status_code} error body: {error_body.decode('utf-8', errors='ignore')[:1000]}")
+                        except Exception as read_error:
+                            logger.error(f"{log_prefix}: Could not read error response body: {read_error}")
+                    
                     response.raise_for_status()
                     
                     buffer = bytearray()

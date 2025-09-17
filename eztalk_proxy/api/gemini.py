@@ -4,6 +4,8 @@ import orjson
 import asyncio
 import base64
 import io
+import os
+import uuid
 from typing import List
 
 import google.generativeai as genai
@@ -26,11 +28,14 @@ from ..models.api_models import (
 from ..core.config import (
     API_TIMEOUT,
     GOOGLE_API_KEY_ENV,
-    MAX_DOCUMENT_UPLOAD_SIZE_MB
+    MAX_DOCUMENT_UPLOAD_SIZE_MB,
+    TEMP_UPLOAD_DIR,
+    SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION
 )
 from ..utils.helpers import (
     get_current_time_iso,
-    orjson_dumps_bytes_wrapper
+    orjson_dumps_bytes_wrapper,
+    extract_text_from_uploaded_document
 )
 from ..services.request_builder import prepare_gemini_rest_api_request
 from ..services.stream_processor import (
@@ -45,19 +50,6 @@ from ..services.format_repair import format_repair_service
 logger = logging.getLogger("EzTalkProxy.Handlers.Gemini")
 
 IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"]
-DOCUMENT_MIME_TYPES = [
-    "application/pdf",
-    "application/x-javascript", "text/javascript",
-    "application/x-python", "text/x-python",
-    "text/plain",
-    "text/html",
-    "text/css",
-    "text/md",
-    "text/markdown",
-    "text/csv",
-    "text/xml",
-    "text/rtf"
-]
 VIDEO_MIME_TYPES = [
     "video/mp4", "video/mpeg", "video/quicktime", "video/x-msvideo", "video/x-flv",
     "video/x-matroska", "video/webm", "video/x-ms-wmv", "video/3gpp", "video/x-m4v"
@@ -170,50 +162,53 @@ async def handle_gemini_request(
         # 非 Google 域名但仍为“AI Studio Build 的二次代理/2api”，按“Gemini REST 语义”使用自定义 base 直连，不再回退到 OpenAI 兼容
         logger.info(f"{log_prefix}: Using Gemini native REST via custom base (AI Studio proxy/2api): {api_address}")
 
-    # Process uploaded files
+    # Process uploaded files - Use comprehensive document processing like OpenAI handler
+    document_texts = []
     if uploaded_files:
         for uploaded_file in uploaded_files:
             mime_type = uploaded_file.content_type.lower() if uploaded_file.content_type else ""
             filename = uploaded_file.filename or "unknown"
             
             try:
+                # Check if it's a document type that should be text-extracted
+                is_document_type = mime_type in SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION
+                
                 if mime_type in IMAGE_MIME_TYPES:
+                    logger.info(f"{log_prefix}: Processing image for Gemini: {filename} ({mime_type})")
                     await uploaded_file.seek(0)
                     file_bytes = await uploaded_file.read()
-                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    base64_data = base64.b64encode(file_bytes).decode('utf-8').replace('\n', '')
                     newly_created_multimodal_parts.append(PyInlineDataContentPart(
                         type="inline_data_content", mimeType=mime_type, base64Data=base64_data
                     ))
-                elif mime_type in DOCUMENT_MIME_TYPES:
-                    logger.info(f"{log_prefix}: Processing document for Gemini: {filename} ({mime_type})")
-                    await uploaded_file.seek(0)
-                    file_bytes = await uploaded_file.read()
-                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
-                    newly_created_multimodal_parts.append(PyInlineDataContentPart(
-                        type="inline_data_content", mimeType=mime_type, base64Data=base64_data
-                    ))
-                elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                    logger.info(f"{log_prefix}: Extracting text from DOCX file for Gemini: {filename}")
-                    await uploaded_file.seek(0)
-                    file_bytes = await uploaded_file.read()
+                elif is_document_type:
+                    # Extract text from documents instead of sending as binary
+                    logger.info(f"{log_prefix}: Extracting text from document for Gemini: {filename} ({mime_type})")
+                    temp_file_path = ""
                     try:
-                        doc_stream = io.BytesIO(file_bytes)
-                        document = docx.Document(doc_stream)
-                        full_text = "\n".join([para.text for para in document.paragraphs])
+                        temp_file_path = os.path.join(TEMP_UPLOAD_DIR, f"{request_id}-{uuid.uuid4()}-{filename}")
+                        await uploaded_file.seek(0)
+                        with open(temp_file_path, "wb") as f:
+                            f.write(await uploaded_file.read())
                         
-                        extracted_text_content = f"\n\n--- START OF DOCUMENT: {filename} ---\n\n{full_text}\n\n--- END OF DOCUMENT: {filename} ---\n"
-                        
-                        newly_created_multimodal_parts.append(PyTextContentPart(
-                            type="text_content", text=extracted_text_content
-                        ))
-                    except Exception as docx_e:
-                        logger.error(f"{log_prefix}: Failed to extract text from DOCX file {filename}: {docx_e}", exc_info=True)
-
+                        extracted_text = await extract_text_from_uploaded_document(
+                            uploaded_file_path=temp_file_path,
+                            mime_type=uploaded_file.content_type,
+                            original_filename=filename
+                        )
+                        if extracted_text:
+                            document_texts.append(extracted_text)
+                            logger.info(f"{log_prefix}: Successfully extracted text from document '{filename}' for Gemini.")
+                    except Exception as e:
+                        logger.error(f"{log_prefix}: Failed to process document for text extraction {filename}: {e}", exc_info=True)
+                    finally:
+                        if temp_file_path and os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
                 elif mime_type in AUDIO_MIME_TYPES:
                     logger.info(f"{log_prefix}: Processing audio for Gemini: {filename} ({mime_type})")
                     await uploaded_file.seek(0)
                     file_bytes = await uploaded_file.read()
-                    base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                    base64_data = base64.b64encode(file_bytes).decode('utf-8').replace('\n', '')
                     newly_created_multimodal_parts.append(PyInlineDataContentPart(
                         type="inline_data_content", mimeType=mime_type, base64Data=base64_data
                     ))
@@ -256,7 +251,7 @@ async def handle_gemini_request(
                         except Exception as file_api_e:
                             logger.error(f"{log_prefix}: Gemini File API upload failed for {filename}: {file_api_e}", exc_info=True)
                     else:
-                        base64_data = base64.b64encode(file_bytes).decode('utf-8')
+                        base64_data = base64.b64encode(file_bytes).decode('utf-8').replace('\n', '')
                         newly_created_multimodal_parts.append(PyInlineDataContentPart(
                             type="inline_data_content", mimeType=mime_type, base64Data=base64_data
                         ))
@@ -264,6 +259,39 @@ async def handle_gemini_request(
                     logger.warning(f"{log_prefix}: Skipping unsupported file type for Gemini: {filename} ({mime_type})")
             except Exception as e:
                 logger.error(f"{log_prefix}: Error processing file {filename} for Gemini: {e}", exc_info=True)
+
+    # Add extracted document context to the last user message
+    if document_texts:
+        full_document_context = "\n\n".join(document_texts)
+        full_document_context = f"--- Document Content ---\n{full_document_context}\n--- End Document ---\n\n"
+        
+        # Find the last user message and prepend document context
+        last_user_message_idx = -1
+        for i in range(len(active_messages_for_llm) - 1, -1, -1):
+            if active_messages_for_llm[i].role == "user":
+                last_user_message_idx = i
+                break
+        
+        if last_user_message_idx != -1:
+            user_msg = active_messages_for_llm[last_user_message_idx]
+            if isinstance(user_msg, PartsApiMessagePy):
+                # Find first text part to prepend to, or insert at the beginning
+                text_part_index = next((idx for idx, p in enumerate(user_msg.parts) if isinstance(p, PyTextContentPart)), -1)
+                if text_part_index != -1:
+                    user_msg.parts[text_part_index].text = full_document_context + user_msg.parts[text_part_index].text
+                else:
+                    user_msg.parts.insert(0, PyTextContentPart(type="text_content", text=full_document_context))
+            elif isinstance(user_msg, SimpleTextApiMessagePy):
+                # Convert to PartsApiMessagePy and prepend document context
+                initial_text = full_document_context + (user_msg.content or "")
+                active_messages_for_llm[last_user_message_idx] = PartsApiMessagePy(
+                    role="user", parts=[PyTextContentPart(type="text_content", text=initial_text)]
+                )
+        else:
+            # No user message found, create one with document context
+            active_messages_for_llm.append(PartsApiMessagePy(
+                role="user", parts=[PyTextContentPart(type="text_content", text=full_document_context)]
+            ))
 
     if newly_created_multimodal_parts:
         last_user_message_idx = -1

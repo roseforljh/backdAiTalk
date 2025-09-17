@@ -37,26 +37,79 @@ SUPPORTED_DOCUMENT_MIME_TYPES_FOR_TEXT_EXTRACTION = [
     "text/html",
     "text/csv",
     "text/markdown",
+    "text/x-markdown",
     "application/json",
     "text/xml",
+    "application/xml",
     "text/rtf",
+    "application/rtf",
     
-    # Document Formats
+    # Microsoft Office Documents
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document", # .docx
     "application/msword", # .doc
+    
+    # Excel Documents
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", # .xlsx
+    "application/vnd.ms-excel", # .xls
+    "text/csv", # .csv (already included above)
+    
+    # PowerPoint Documents  
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation", # .pptx
+    "application/vnd.ms-powerpoint", # .ppt
+    
+    # Open Office Documents
+    "application/vnd.oasis.opendocument.text", # .odt
+    "application/vnd.oasis.opendocument.spreadsheet", # .ods
+    "application/vnd.oasis.opendocument.presentation", # .odp
+    
+    # E-book Formats
+    "application/epub+zip", # .epub
+    
+    # Archive Formats (text extraction from contained files)
+    # "application/zip", # .zip (uncomment if needed)
+    # "application/x-rar-compressed", # .rar (uncomment if needed)
 
-    # Audio Formats
+    # Audio Formats (for transcription)
     "audio/flac",
     "audio/wav",
     "audio/x-wav",
+    "audio/mpeg", # .mp3
+    "audio/mp4", # .m4a
+    "audio/aac",
+    "audio/ogg",
+    "audio/webm",
 
-    # Common Code Formats (treated as plain text)
+    # Common Code & Configuration Formats
     "application/x-javascript",
     "text/javascript",
     "text/css",
     "application/x-python",
     "text/x-python",
+    "application/x-yaml",
+    "text/yaml",
+    "text/x-yaml",
+    "application/toml",
+    "text/x-toml",
+    "application/x-sh",
+    "text/x-shellscript",
+    "application/x-php",
+    "text/x-php",
+    "application/x-ruby",
+    "text/x-ruby",
+    "application/x-perl",
+    "text/x-perl",
+    "application/x-httpd-php",
+    "text/x-c",
+    "text/x-c++",
+    "text/x-java-source",
+    "text/x-csharp",
+    
+    # Log & Config Files
+    "text/x-log",
+    "application/x-log",
+    "text/x-ini",
+    "application/x-wine-extension-ini",
 ]
 
 GEMINI_SUPPORTED_UPLOAD_MIMETYPES = [
